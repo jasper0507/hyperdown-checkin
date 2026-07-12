@@ -1,0 +1,11 @@
+# 复制为 config.toml 并填写：
+#   cp config.example.toml config.toml
+#   chmod 600 config.toml
+
+api_base_url = "https://hyperdown.net"
+email = "you@example.com"
+password = "your-password"
+user_agent = "Mozilla/5.0 Hyperdown/3.0"
+
+# 可选 HTTP/HTTPS 代理
+# proxy = "http://127.0.0.1:7890"
