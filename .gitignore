@@ -1,0 +1,7 @@
+config.toml
+tokens.json
+logs/
+__pycache__/
+*.pyc
+.venv/
+venv/
