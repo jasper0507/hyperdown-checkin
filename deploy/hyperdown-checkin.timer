@@ -1,0 +1,14 @@
+[Unit]
+Description=Run Hyperdown check-in daily
+Requires=hyperdown-checkin.service
+
+[Timer]
+# 每天 08:05（服务器本地时区，建议设为 Asia/Shanghai）
+OnCalendar=*-*-* 08:05:00
+# 机器关机错过时，开机后补跑一次
+Persistent=true
+RandomizedDelaySec=120
+Unit=hyperdown-checkin.service
+
+[Install]
+WantedBy=timers.target
