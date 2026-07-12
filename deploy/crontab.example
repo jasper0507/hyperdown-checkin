@@ -1,0 +1,17 @@
+# 若不用 systemd，可用 cron（复制到 crontab -e）
+#
+# 建议先安装到固定目录并创建 venv：
+#   sudo mkdir -p /opt/hyperdown-checkin
+#   sudo rsync -a ./ /opt/hyperdown-checkin/
+#   cd /opt/hyperdown-checkin && sudo python3 -m venv .venv
+#   sudo .venv/bin/pip install -r requirements.txt
+#   sudo cp deploy/env.example /etc/hyperdown-checkin.env
+#   sudo chmod 600 /etc/hyperdown-checkin.env
+#
+# 时区：timedatectl set-timezone Asia/Shanghai
+
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# 每天 08:05，随机抖动避免整点撞车（可选）
+5 8 * * * set -a; source /etc/hyperdown-checkin.env; set +a; cd /opt/hyperdown-checkin && /opt/hyperdown-checkin/.venv/bin/python checkin.py >> /opt/hyperdown-checkin/logs/cron.log 2>&1
