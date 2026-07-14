@@ -23,12 +23,19 @@ fi
 echo "==> 安装目录: ${APP_DIR}"
 echo "==> 运行用户: ${APP_USER}"
 
+if ! command -v rsync &>/dev/null; then
+  echo "未找到 rsync，请先安装（apt install rsync / dnf install rsync）" >&2
+  exit 1
+fi
+
 if ! id -u "${APP_USER}" &>/dev/null; then
   useradd --system --home "${APP_DIR}" --shell /usr/sbin/nologin "${APP_USER}"
 fi
 
 mkdir -p "${APP_DIR}"
-# 同步代码（排除本地密钥与缓存）
+# 同步代码（排除本地密钥与缓存）。
+# 注意：--delete 会删除 APP_DIR 下源码树中不存在的文件；
+# .venv / config.toml / tokens.json / logs 已 exclude，不会被删。
 rsync -a --delete \
   --exclude '.venv' \
   --exclude '__pycache__' \
@@ -43,11 +50,11 @@ chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   cp "${APP_DIR}/deploy/env.example" "${ENV_FILE}"
-  chmod 600 "${ENV_FILE}"
   echo "==> 已创建 ${ENV_FILE}，请编辑填写 HYPERDOWN_EMAIL / HYPERDOWN_PASSWORD"
 else
   echo "==> 保留已有 ${ENV_FILE}"
 fi
+chmod 600 "${ENV_FILE}"
 
 echo "==> 创建 Python venv 并安装依赖"
 if ! command -v python3 &>/dev/null; then
@@ -99,4 +106,4 @@ echo "3) 看日志:    sudo journalctl -u hyperdown-checkin.service -n 50 --no-p
 echo "             或 tail -f ${APP_DIR}/logs/checkin.log"
 echo "4) 看定时:    systemctl list-timers hyperdown-checkin.timer"
 echo
-echo "注意: 若试跑仍报 secure_request_invalid，需继续对齐安全封包（见 README）。"
+echo "成功日志应含「签到成功」或「今日已签到」；详见 README / STATUS.md。"

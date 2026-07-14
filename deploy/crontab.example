@@ -1,4 +1,5 @@
 # 若不用 systemd，可用 cron（复制到 crontab -e）
+# 更推荐：sudo bash deploy/install.sh + hyperdown-checkin.timer
 #
 # 建议先安装到固定目录并创建 venv：
 #   sudo mkdir -p /opt/hyperdown-checkin
@@ -9,9 +10,12 @@
 #   sudo chmod 600 /etc/hyperdown-checkin.env
 #
 # 时区：timedatectl set-timezone Asia/Shanghai
+#
+# 注意：若 /etc/hyperdown-checkin.env 为 root:root 600，请用 root 的 crontab
+# （如下），不要用 hyperdown 用户 source 该文件。
 
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
 
-# 每天 08:05，随机抖动避免整点撞车（可选）
+# 每天 08:05（root crontab）
 5 8 * * * set -a; source /etc/hyperdown-checkin.env; set +a; cd /opt/hyperdown-checkin && /opt/hyperdown-checkin/.venv/bin/python checkin.py >> /opt/hyperdown-checkin/logs/cron.log 2>&1

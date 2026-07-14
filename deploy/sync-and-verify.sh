@@ -28,13 +28,10 @@ fi
 SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o ConnectTimeout=20)
 SCP=(scp -i "$KEY" -o IdentitiesOnly=yes)
 
-echo "==> 同步源码"
-"${SCP[@]}" \
-  "$SRC/checkin.py" "$SRC/client.py" "$SRC/secure_api.py" "$SRC/requirements.txt" \
-  "$HOST:/tmp/hd-sync/"
-
-# ensure remote tmp dir
+echo "==> 准备远程临时目录"
 "${SSH[@]}" "$HOST" 'mkdir -p /tmp/hd-sync'
+
+echo "==> 同步源码与 unit"
 "${SCP[@]}" \
   "$SRC/checkin.py" "$SRC/client.py" "$SRC/secure_api.py" "$SRC/requirements.txt" \
   "$SRC/deploy/hyperdown-checkin.service" "$SRC/deploy/hyperdown-checkin.timer" \
@@ -49,10 +46,15 @@ cp /tmp/hd-sync/hyperdown-checkin.service /tmp/hd-sync/hyperdown-checkin.timer /
 chown -R hyperdown:hyperdown "\$APP_DIR"
 chmod +x "\$APP_DIR/.venv/bin/"* 2>/dev/null || true
 # 依赖
-sudo -u hyperdown "\$APP_DIR/.venv/bin/pip" install -q -r "\$APP_DIR/requirements.txt" || \
-  "\$APP_DIR/.venv/bin/pip" install -q -r "\$APP_DIR/requirements.txt"
-# tomli for py<3.11
-"\$APP_DIR/.venv/bin/pip" install -q 'tomli>=2.0.0' || true
+if [[ -x "\$APP_DIR/.venv/bin/pip" ]]; then
+  sudo -u hyperdown "\$APP_DIR/.venv/bin/pip" install -q -r "\$APP_DIR/requirements.txt" || \
+    "\$APP_DIR/.venv/bin/pip" install -q -r "\$APP_DIR/requirements.txt"
+  "\$APP_DIR/.venv/bin/pip" install -q 'tomli>=2.0.0' || true
+fi
+# 确保 env 权限（若存在）
+if [[ -f /etc/hyperdown-checkin.env ]]; then
+  chmod 600 /etc/hyperdown-checkin.env
+fi
 systemctl daemon-reload
 systemctl enable hyperdown-checkin.timer
 systemctl restart hyperdown-checkin.timer
@@ -63,7 +65,9 @@ journalctl -u hyperdown-checkin.service -n 30 --no-pager
 echo "==> timer"
 systemctl list-timers hyperdown-checkin.timer --no-pager
 echo "==> python"
-sudo -u hyperdown "\$APP_DIR/.venv/bin/python" -c 'import tomllib,nacl,cryptography; print("imports_ok", __import__("sys").version)'
+if [[ -x "\$APP_DIR/.venv/bin/python" ]]; then
+  sudo -u hyperdown "\$APP_DIR/.venv/bin/python" -c 'import nacl,cryptography; print("imports_ok", __import__("sys").version)'
+fi
 EOF
 
 echo "完成。"

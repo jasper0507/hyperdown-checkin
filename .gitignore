@@ -5,3 +5,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.env
+*.pem
+*.key
+*.toml.bak
+.DS_Store

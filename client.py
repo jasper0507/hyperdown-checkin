@@ -11,7 +11,8 @@ from typing import Any
 
 from secure_api import is_sensitive_path, normalize_api_path, seal_json
 
-DEFAULT_UA = "Mozilla/5.0 Hyperdown/3.0"
+# Official desktop client uses the Go default transport UA.
+DEFAULT_UA = "Go-http-client/1.1"
 DEFAULT_BASE = "https://hyperdown.net/api/v1"
 
 
@@ -110,7 +111,11 @@ class HyperdownClient:
         )
 
         if use_secure:
-            envelope, extra = seal_json(method, full_path, body)
+            # Official client: SealJSON(method, path, accessToken, body)
+            token = self.tokens.access_token if auth else ""
+            envelope, extra = seal_json(
+                method, full_path, body, access_token=token or ""
+            )
             headers.update(extra)
             raw_body = json.dumps(envelope, separators=(",", ":")).encode()
         elif body is not None:

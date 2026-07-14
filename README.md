@@ -87,7 +87,7 @@ chmod 600 config.toml
 api_base_url = "https://hyperdown.net"
 email = "you@example.com"
 password = "your-password"
-user_agent = "Mozilla/5.0 Hyperdown/3.0"
+user_agent = "Go-http-client/1.1"
 # proxy = "http://127.0.0.1:7890"   # 可选
 ```
 
@@ -280,7 +280,7 @@ sudo systemctl disable --now hyperdown-checkin.timer
 | 配置错误 / 退出码 1 | 未写 env 或 config | 检查 `/etc/hyperdown-checkin.env` 或 `config.toml` |
 | 鉴权失败 / 退出码 2 | 邮箱密码错误 | 改密码后重试登录 |
 | 网络错误 / 退出码 4 | 出网 / DNS / 代理 | 检查服务器能否访问 hyperdown.net |
-| `secure_request_invalid` / 退出码 3 | 签到安全封包未对齐 | 见 [第 8 节](#8-当前能力与已知限制) |
+| `secure_request_invalid` / 退出码 3 | 封包被服务端拒绝 | 确认 NTP/时区；勿在 env 中设置旧版 `HYPERDOWN_*_VARIANT`；见 [STATUS.md](./STATUS.md) |
 | Python 报缺 `tomllib` | 系统 Python &lt; 3.11 且未装 tomli | 在 venv 中 `pip install tomli`，或跑 `deploy/remote-fix-tomllib.sh` |
 
 ---
@@ -294,8 +294,7 @@ sudo systemctl disable --now hyperdown-checkin.timer
 | （无） | 登录 + 签到 |
 | `--login-only` | 仅登录并保存 token |
 | `--me-only` | 仅查询用户信息 |
-| `--probe-secure` | 探测安全封包 KDF/线格式变体（调试） |
-| `--force` | 即使已签到也强制再调签到接口 |
+| `--force` | 即使已签到也强制再调签到接口（服务端已签到仍 exit 0） |
 | `--config PATH` | 指定配置文件路径 |
 
 ### 退出码
@@ -312,67 +311,76 @@ sudo systemctl disable --now hyperdown-checkin.timer
 
 ## 7. 环境变量一览
 
+生产环境只需账号密码（云上写入 `/etc/hyperdown-checkin.env`，`chmod 600`）：
+
 | 变量 | 含义 |
 |------|------|
 | `HYPERDOWN_EMAIL` | 登录邮箱 |
 | `HYPERDOWN_PASSWORD` | 登录密码 |
 | `HYPERDOWN_API_BASE` | API 根，默认 `https://hyperdown.net` |
 | `HYPERDOWN_PROXY` | HTTP/HTTPS 代理 |
-| `HYPERDOWN_USER_AGENT` | User-Agent |
-| `HYPERDOWN_KDF_VARIANT` | 安全封包 KDF 变体（调试） |
-| `HYPERDOWN_WIRE_VARIANT` | 安全封包线格式变体（调试） |
-| `HYPERDOWN_SIGN_VARIANT` | 签名消息拼法变体（调试） |
-| `HYPERDOWN_SECURE_MASTER_KEY` | 覆盖内嵌主密钥 hex（一般无需改） |
+| `HYPERDOWN_USER_AGENT` | 默认 `Go-http-client/1.1`（与官方客户端一致） |
 
-云上推荐只写 `/etc/hyperdown-checkin.env`，无需 `config.toml`。
+调试用（**默认已通过服务端校验，生产请勿设置**）：
+
+| 变量 | 默认 | 含义 |
+|------|------|------|
+| `HYPERDOWN_KDF_VARIANT` | `ecdh_re_primary` | KDF 变体 |
+| `HYPERDOWN_SIGN_VARIANT` | `v3_token_nul` | 签名字段拼法 |
+| `HYPERDOWN_B64_VARIANT` | `rawurl` | Raw URL-safe Base64（无 padding） |
+| `HYPERDOWN_SIGN_SEP` | `nul` | 签名字段分隔符 |
+| `HYPERDOWN_SECURE_PEER_PUB` | 内嵌 hex | 覆盖对端 X25519 **公钥**（非账号密钥） |
+| `HYPERDOWN_SECURE_MASTER_KEY` | （同上别名） | 兼容旧名，优先使用 `PEER_PUB` |
+
+云上推荐只写 env 文件，无需 `config.toml`。
 
 ---
 
 ## 8. 当前能力与已知限制
 
-更细的收底说明见 [STATUS.md](./STATUS.md)。
+更细的算法与运维说明见 [STATUS.md](./STATUS.md)。
 
 | 能力 | 状态 | 说明 |
 |------|------|------|
 | 登录 / 刷新 token | ✅ | `POST /auth/login`、`/auth/refresh` |
 | 查询用户 / 是否已签到 | ✅ | `GET /me/` |
-| 今日已签到 → 退出 0 | ✅ | 幂等，适合 cron |
-| 真正发起签到 API | ⚠️ | 安全封包可能仍返回 `secure_request_invalid` |
-| systemd 定时触发 | ✅ | timer 可正常启用与触发 |
+| 今日已签到 → 退出 0 | ✅ | 幂等，适合 cron / timer |
+| 真正发起签到 API | ✅ | 安全封包已对齐官方抓包；服务端已签到时 `--force` 仍 exit 0 |
+| systemd 定时触发 | ✅ | 默认约每天 08:05（本地时区） |
 
 ### 安全封包（签到接口）
 
-签到需要客户端 `secureapi.SealJSON` 风格封包。逆向已确认：
+`POST /api/v1/me/checkins` 使用与官方 `SealJSON` 一致的信封（详见 STATUS.md）：
 
 | 项 | 值 |
 |----|-----|
 | Header | `X-Hyperdown-Secure: v1` |
-| 算法 | HKDF-SHA256 + XChaCha20-Poly1305 + HMAC-SHA256 |
-| Envelope | `{ "ts", "nonce", "ciphertext", "sign" }` |
-| 签名编码 | HMAC 摘要再 **Base64** |
-| 敏感路径示例 | `/api/v1/me/checkins` 等 |
+| 密钥协商 | 临时 X25519 + ECDH（对端公钥内嵌） |
+| 派生 | HKDF-SHA256 |
+| 加密 | XChaCha20-Poly1305 |
+| 签名 | HMAC-SHA256（含 **access_token**） |
+| 字段编码 | nonce / ciphertext / sign = **Raw URL Base64** |
+| Envelope | `v, request_id, ts, nonce, pub, ciphertext, sign` |
+| User-Agent | `Go-http-client/1.1` |
 | 登录 | **无需**封包 |
 
-结构正确时，错误会从 `secure_request_required` 变为 `secure_request_invalid`（说明过了「要不要封包」这道门，差在 KDF / AAD / 线格式精确拼法）。
+### 运维注意
 
-### 若返回 `secure_request_invalid`
-
-1. 确认服务器时间准确（NTP）
-2. 运行 `python3 checkin.py --probe-secure` 试变体
-3. 按 README 第 7 节调整 `HYPERDOWN_*_VARIANT`
-4. **推荐闭环**：用官方客户端 + mitmproxy/Fiddler 抓一次「点击签到」的请求体（`ts/nonce/ciphertext/sign`），对照修改 `secure_api.py` 后同步到服务器再试跑
-
-**说明**：在**已签到日**，脚本不会调用签到 API，只会查询并成功退出；在**未签到日**才会真正打签到接口，此时若封包未对齐会失败（退出码 3）。
+1. 保持服务器 **NTP** 与建议时区 **Asia/Shanghai**（`ts` 参与校验）
+2. `/etc/hyperdown-checkin.env` 勿残留旧版 `HYPERDOWN_WIRE_VARIANT` 等无效变量
+3. 已签到日默认只查询并 exit 0；未签到日才会真正打签到接口
+4. 官方客户端升级后协议可能变化，届时需对照抓包更新 `secure_api.py`
 
 ---
 
 ## 9. 安全与合规
 
-- **切勿**把 `config.toml`、`tokens.json`、`/etc/hyperdown-checkin.env` 提交到 Git（已在 `.gitignore` 中忽略前两者）
-- 服务器上密钥文件请保持 `chmod 600`
+- **切勿**把 `config.toml`、`tokens.json`、`/etc/hyperdown-checkin.env`、私钥（`*.pem`）提交到 Git（见 `.gitignore`）
+- 服务器上密钥文件请保持 `chmod 600`（`install.sh` 会强制设置）
+- 手动调试请用 `sudo systemctl start hyperdown-checkin.service`，勿以 `hyperdown` 用户直接 `source` root 持有的 env
 - 自动化可能违反服务条款，请**仅限个人学习 / 自用**
 - 客户端升级后协议可能变化，届时需重新对照官方客户端
-- 本仓库默认建议设为 **Private**
+- 内嵌 `PEER_PUB` 是官方客户端中的 **X25519 公钥材料**，不是你的账号密码
 
 ---
 
@@ -386,7 +394,7 @@ hyperdown-checkin/
 ├── config.example.toml        # 配置模板（复制为 config.toml）
 ├── requirements.txt
 ├── README.md                  # 本说明
-├── STATUS.md                  # 收底状态与技术债
+├── STATUS.md                  # 算法与运维终态
 ├── .gitignore
 └── deploy/
     ├── install.sh             # 云服务器一键安装

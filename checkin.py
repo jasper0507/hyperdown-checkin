@@ -6,7 +6,7 @@ Usage:
   python3 checkin.py                  # login + check-in
   python3 checkin.py --login-only
   python3 checkin.py --me-only
-  python3 checkin.py --probe-secure   # try KDF/wire variants (debug)
+  python3 checkin.py --force          # call check-in API even if already done
 
 Exit codes:
   0 success or already checked in
@@ -22,7 +22,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,8 +34,8 @@ except ModuleNotFoundError:  # pragma: no cover
     except ModuleNotFoundError:
         tomllib = None  # type: ignore
 
-from client import APIError, HyperdownClient, TokenPair
-from secure_api import KDF_VARIANT, SIGN_VARIANT, WIRE_VARIANT
+from client import DEFAULT_UA, APIError, HyperdownClient, TokenPair
+from secure_api import B64_VARIANT, KDF_VARIANT, SIGN_VARIANT
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.toml"
@@ -67,7 +67,7 @@ def load_config(path: Path) -> dict[str, Any]:
     """
     cfg: dict[str, Any] = {
         "api_base_url": "https://hyperdown.net",
-        "user_agent": "Mozilla/5.0 Hyperdown/3.0",
+        "user_agent": DEFAULT_UA,
         "email": "",
         "password": "",
         "proxy": "",
@@ -173,7 +173,7 @@ def do_checkin(client: HyperdownClient, user: dict[str, Any]) -> int:
         return EXIT_OK
 
     log(
-        f"开始签到（KDF={KDF_VARIANT}, WIRE={WIRE_VARIANT}, SIGN={SIGN_VARIANT}）…"
+        f"开始签到（KDF={KDF_VARIANT}, SIGN={SIGN_VARIANT}, B64={B64_VARIANT}）…"
     )
     try:
         result = client.check_in()
@@ -181,6 +181,10 @@ def do_checkin(client: HyperdownClient, user: dict[str, Any]) -> int:
         if e.code == "network_error":
             log(f"网络错误: {e.message}")
             return EXIT_NETWORK
+        # Idempotent: server says already done
+        if e.code in ("already_checked_in", "already_check_in", "checked_in"):
+            log(f"服务端确认今日已签到: {e.message}")
+            return EXIT_OK
         log(f"签到失败: [{e.code}] {e.message}")
         if e.code in (
             "secure_request_invalid",
@@ -189,8 +193,7 @@ def do_checkin(client: HyperdownClient, user: dict[str, Any]) -> int:
             "secure_request_replayed",
         ):
             log(
-                "安全封包未通过服务端校验。登录/查询可用；签到加密仍待对齐。"
-                "请用官方客户端抓一次签到请求，或运行: python3 checkin.py --probe-secure"
+                "安全封包未通过服务端校验。请检查 secure_api 版本与服务器时间/NTP。"
             )
         return EXIT_CHECKIN
 
@@ -206,70 +209,17 @@ def do_checkin(client: HyperdownClient, user: dict[str, Any]) -> int:
     return EXIT_OK
 
 
-def probe_secure() -> int:
-    """Try a small matrix of seal variants against /me/checkins (no auth)."""
-    import os as _os
-    from secure_api import derive_key  # noqa: F401
-
-    variants = [
-        ("salt_digest_info_method_path", "nonce_hex_ct_b64"),
-        ("salt_digest_info_prefix_method_path", "nonce_hex_ct_b64"),
-        ("salt_digest_info_prefix_only", "nonce_hex_ct_b64"),
-        ("salt_prefix_info_digest", "nonce_hex_ct_b64"),
-        ("salt_prefix_info_material", "nonce_hex_ct_b64"),
-        ("salt_prefix_info_method_path", "nonce_hex_ct_b64"),
-        ("salt_digest_info_empty", "nonce_hex_ct_b64"),
-        ("salt_prefix_info_empty", "nonce_hex_ct_b64"),
-        ("salt_digest_info_method_path", "nonce_hex_ct_hex"),
-        ("salt_digest_info_method_path", "nonce_b64_ct_b64"),
-        ("salt_digest_info_method_path", "nonce_hex_ct_b64_with_nonce"),
-        ("salt_prefix_info_digest", "nonce_hex_ct_hex"),
-        ("salt_prefix_info_digest", "nonce_b64_ct_b64"),
-    ]
-    client = HyperdownClient()
-    for kdf, wire in variants:
-        _os.environ["HYPERDOWN_KDF_VARIANT"] = kdf
-        _os.environ["HYPERDOWN_WIRE_VARIANT"] = wire
-        # Reload module constants
-        import importlib
-        import secure_api as sa
-
-        importlib.reload(sa)
-        try:
-            client.request("POST", "/me/checkins", body={}, auth=False, secure=True)
-            log(f"UNEXPECTED SUCCESS kdf={kdf} wire={wire}")
-            return EXIT_OK
-        except APIError as e:
-            log(f"kdf={kdf} wire={wire} -> {e.code}: {e.message[:60]}")
-            if e.code not in (
-                "secure_request_invalid",
-                "secure_request_required",
-                "unauthorized",
-            ):
-                log(f"interesting error: {e}")
-    log("probe 结束（均未通过业务校验；结构正确时应多为 secure_request_invalid 或 unauthorized）")
-    return EXIT_CHECKIN
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Hyperdown 每日自动签到")
     parser.add_argument("--config", type=Path, default=CONFIG_PATH)
     parser.add_argument("--login-only", action="store_true", help="仅登录并保存 token")
     parser.add_argument("--me-only", action="store_true", help="仅查询用户信息")
     parser.add_argument(
-        "--probe-secure",
-        action="store_true",
-        help="探测安全封包 KDF/线格式变体（调试用）",
-    )
-    parser.add_argument(
         "--force",
         action="store_true",
         help="即使 is_check_in=true 也尝试签到",
     )
     args = parser.parse_args(argv)
-
-    if args.probe_secure:
-        return probe_secure()
 
     try:
         cfg = load_config(args.config)
@@ -283,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     email = str(cfg.get("email") or "").strip()
     password = str(cfg.get("password") or "")
     base = str(cfg.get("api_base_url") or "https://hyperdown.net")
-    ua = str(cfg.get("user_agent") or "Mozilla/5.0 Hyperdown/3.0")
+    ua = str(cfg.get("user_agent") or DEFAULT_UA)
     proxy = str(cfg.get("proxy") or "")
 
     client = HyperdownClient(

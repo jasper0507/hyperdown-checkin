@@ -1,27 +1,25 @@
-"""Hyperdown secure request sealing (RE from client v1.1.3).
+"""Hyperdown secure sealing — RE + capture 2026-07-14 + caller arg map.
 
-Verified against Hyperdown.exe secureapi symbols:
+Wire (official capture):
+  v, request_id, ts, nonce, pub, ciphertext, sign
+  nonce/ciphertext/sign = base64.RawURLEncoding (no padding)
+  ciphertext len for {} = 18 bytes (no AEAD nonce prepended)
+  pub = ephemeral X25519 public key (hex)
 
-deriveKey:
-  material = nonce_hex + ":" + fmt.Sprint(ts)
-  salt     = SHA256(material)          # 32 bytes
-  info     = "hyperdown-secure-api:v1:" + ToUpper(method) + ":" + normalize(path)
-  key      = HKDF-SHA256(ikm=master_key, salt=salt, info=info, length=32)
+Crypto (SealJSON):
+  eph = X25519.GenerateKey()
+  shared = eph.ECDH(NewPublicKey(embedded_32B))  # embedded hex = peer PUBLIC key
+  request_id = randomHex(16)
+  key = HKDF-SHA256(shared, salt=SHA256(request_id+":"+ts),
+                    info="hyperdown-secure-api:v1:"+METHOD+":"+path)
+  aad = METHOD+"\\n"+path+"\\n"+request_id+"\\n"+ts
+  sealed = XChaCha20-Poly1305.Seal(key, n24, body, aad)
 
-associatedData (AAD for AEAD) — order is nonce BEFORE ts:
-  ToUpper(method) + "\\n" + path + "\\n" + nonce_hex + "\\n" + fmt.Sprint(ts)
-
-Seal:
-  randomHex(16) -> nonce_hex (envelope anti-replay / KDF)
-  randomBytes(24) -> XChaCha20-Poly1305 nonce
-  ciphertext = XChaCha20-Poly1305.Seal(key, aead_nonce, body, aad)
-
-Wire (RE + trial):
-  Header: X-Hyperdown-Secure: v1
-  Body: {ts, nonce, ciphertext, sign}
-  nonce likely hex(16 random bytes)
-  ciphertext likely base64(aead_nonce || sealed) or base64(sealed) / hex(sealed)
-  sign = base64(HMAC-SHA256(key, sign_msg))
+Sign (signEnvelope + HTTP caller):
+  SealJSON(method, path, accessToken, body)
+  HMAC-SHA256(key, join_nul(
+    "v1", METHOD, path, request_id, ts, nonce, pub, ciphertext, accessToken
+  )) then RawURLEncoding
 """
 
 from __future__ import annotations
@@ -36,28 +34,46 @@ import time
 from typing import Any
 
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 try:
-    from nacl.bindings import crypto_aead_xchacha20poly1305_ietf_encrypt
+    from nacl.bindings import (
+        crypto_aead_xchacha20poly1305_ietf_encrypt,
+        crypto_scalarmult,
+    )
 except ImportError as exc:  # pragma: no cover
-    raise SystemExit(
-        "缺少 PyNaCl，请先: pip install pynacl cryptography"
-    ) from exc
+    raise SystemExit("缺少 PyNaCl: pip install pynacl cryptography") from exc
 
-_MASTER_KEY_HEX = (
+# Client-embedded 32-byte peer public key (NewPublicKey), not a private seed
+# and not an account credential. Override via HYPERDOWN_SECURE_PEER_PUB
+# (legacy alias: HYPERDOWN_SECURE_MASTER_KEY).
+_PEER_PUB_HEX = (
     "dd85f63f107a32ce3def4835fe56c27865a1557fedad19adbd72ff81ea2e1025"
 )
-MASTER_KEY = bytes.fromhex(
-    os.environ.get("HYPERDOWN_SECURE_MASTER_KEY", _MASTER_KEY_HEX)
+PEER_PUBLIC_KEY = bytes.fromhex(
+    os.environ.get("HYPERDOWN_SECURE_PEER_PUB")
+    or os.environ.get("HYPERDOWN_SECURE_MASTER_KEY")
+    or _PEER_PUB_HEX
 )
 SALT_PREFIX = b"hyperdown-secure-api:v1:"
 SECURE_HEADER = "v1"
 
-# Primary RE hypothesis; override via env for probes.
-KDF_VARIANT = os.environ.get("HYPERDOWN_KDF_VARIANT", "re_primary")
-WIRE_VARIANT = os.environ.get("HYPERDOWN_WIRE_VARIANT", "nonce_hex_ct_b64_n24ct")
-SIGN_VARIANT = os.environ.get("HYPERDOWN_SIGN_VARIANT", "v1_nl_method_path_nonce_ts_ct")
+# Production defaults (verified 2026-07-14). Env overrides are debug-only.
+KDF_VARIANT = os.environ.get("HYPERDOWN_KDF_VARIANT", "ecdh_re_primary")
+SIGN_VARIANT = os.environ.get("HYPERDOWN_SIGN_VARIANT", "v3_token_nul")
+B64_VARIANT = os.environ.get("HYPERDOWN_B64_VARIANT", "rawurl")
+SIGN_SEP = os.environ.get("HYPERDOWN_SIGN_SEP", "nul")  # nul|nl
+
+
+def b64encode_field(data: bytes) -> str:
+    if B64_VARIANT == "rawurl":
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+    if B64_VARIANT == "std":
+        return base64.standard_b64encode(data).decode()
+    if B64_VARIANT == "rawstd":
+        return base64.standard_b64encode(data).rstrip(b"=").decode()
+    raise ValueError(B64_VARIANT)
 
 
 def is_sensitive_path(method: str, path: str) -> bool:
@@ -83,95 +99,112 @@ def normalize_api_path(path: str) -> str:
     return path
 
 
-def associated_data(method: str, path: str, ts: int, nonce_hex: str) -> bytes:
-    """AAD bytes — RE order: method, path, nonce, ts (not ts before nonce)."""
-    return (
-        f"{method.upper()}\n{normalize_api_path(path)}\n{nonce_hex}\n{ts}"
-    ).encode()
+def associated_data(method: str, path: str, ts: int, request_id: str) -> bytes:
+    return f"{method.upper()}\n{normalize_api_path(path)}\n{request_id}\n{ts}".encode()
 
 
-def derive_key(method: str, path: str, ts: int, nonce_hex: str) -> bytes:
+def _ecdh_shared() -> tuple[bytes, str]:
+    eph = x25519.X25519PrivateKey.generate()
+    eph_priv = eph.private_bytes_raw()
+    eph_pub = eph.public_key().public_bytes_raw()
+    shared = crypto_scalarmult(eph_priv, PEER_PUBLIC_KEY)
+    return shared, eph_pub.hex()
+
+
+def derive_key(ikm: bytes, method: str, path: str, ts: int, request_id: str) -> bytes:
     method_u = method.upper()
     path_n = normalize_api_path(path)
-    material = f"{nonce_hex}:{ts}".encode()
-    digest = hashlib.sha256(material).digest()
-    info_primary = SALT_PREFIX + f"{method_u}:{path_n}".encode()
+    v = KDF_VARIANT
+    if v in ("ecdh_re_primary", "re_primary"):
+        material = f"{request_id}:{ts}".encode()
+        salt = hashlib.sha256(material).digest()
+        info = SALT_PREFIX + f"{method_u}:{path_n}".encode()
+        return HKDF(hashes.SHA256(), 32, salt, info).derive(ikm)
+    if v == "ecdh_raw":
+        return ikm if len(ikm) == 32 else hashlib.sha256(ikm).digest()
+    if v == "ecdh_sha256":
+        return hashlib.sha256(ikm).digest()
+    if v == "ecdh_ts_first":
+        material = f"{ts}:{request_id}".encode()
+        salt = hashlib.sha256(material).digest()
+        info = SALT_PREFIX + f"{method_u}:{path_n}".encode()
+        return HKDF(hashes.SHA256(), 32, salt, info).derive(ikm)
+    raise ValueError(v)
 
-    variant = KDF_VARIANT
-    if variant == "re_primary":
-        salt, info = digest, info_primary
-    elif variant == "salt_digest_info_method_path":
-        salt, info = digest, f"{method_u}:{path_n}".encode()
-    elif variant == "salt_prefix_info_digest":
-        salt, info = SALT_PREFIX, digest
-    elif variant == "salt_prefix_info_material":
-        salt, info = SALT_PREFIX, material
-    elif variant == "salt_prefix_info_method_path":
-        salt, info = SALT_PREFIX, f"{method_u}:{path_n}".encode()
-    elif variant == "salt_digest_info_empty":
-        salt, info = digest, b""
-    elif variant == "salt_prefix_info_empty":
-        salt, info = SALT_PREFIX, b""
-    else:
-        raise ValueError(f"unknown KDF_VARIANT: {variant}")
 
-    return HKDF(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        info=info,
-    ).derive(MASTER_KEY)
+def _sep() -> bytes:
+    return b"\x00" if SIGN_SEP == "nul" else b"\n"
 
 
 def build_sign_message(
     method: str,
     path: str,
     ts: int,
-    nonce_hex: str,
-    ciphertext_field: str,
-    *,
-    aead_nonce_b64: str = "",
-    nonce_field: str = "",
+    request_id: str,
+    nonce_field: str,
+    pub: str,
+    ciphertext: str,
+    access_token: str = "",
 ) -> bytes:
     method_u = method.upper()
     path_n = normalize_api_path(path)
-    n_for_sign = nonce_field or nonce_hex
+    sep = _sep()
     v = SIGN_VARIANT
-    if v == "v1_nl_method_path_nonce_ts_ct":
-        # Match AAD field order after version prefix
-        return f"v1\n{method_u}\n{path_n}\n{nonce_hex}\n{ts}\n{ciphertext_field}".encode()
-    if v == "v1_nl_method_path_ts_nonce_ct":
-        return f"v1\n{method_u}\n{path_n}\n{ts}\n{nonce_hex}\n{ciphertext_field}".encode()
-    if v == "v1_nl_aad_ct":
-        aad = associated_data(method_u, path_n, ts, nonce_hex)
-        return b"v1\n" + aad + b"\n" + ciphertext_field.encode()
-    if v == "v1_nl_method_path_nonce_ts_ct_aead":
-        return (
-            f"v1\n{method_u}\n{path_n}\n{nonce_hex}\n{ts}\n"
-            f"{ciphertext_field}\n{aead_nonce_b64}"
-        ).encode()
-    if v == "v1_null_method_path_nonce_ts_ct":
-        return (
-            b"v1\x00"
-            + method_u.encode()
-            + b"\x00"
-            + path_n.encode()
-            + b"\x00"
-            + nonce_hex.encode()
-            + b"\x00"
-            + str(ts).encode()
-            + b"\x00"
-            + ciphertext_field.encode()
+
+    def join(parts: list[str]) -> bytes:
+        return sep.join(p.encode() for p in parts)
+
+    if v == "v3_token_nul":
+        # method, path, envelope fields, then access token (SealJSON 3rd arg).
+        # Always append the token field (may be empty) to match join(..., token).
+        return join(
+            [
+                "v1",
+                method_u,
+                path_n,
+                request_id,
+                str(ts),
+                nonce_field,
+                pub,
+                ciphertext,
+                access_token or "",
+            ]
         )
-    if v == "v1_nl_method_path_nfield_ts_ct":
-        return f"v1\n{method_u}\n{path_n}\n{n_for_sign}\n{ts}\n{ciphertext_field}".encode()
-    raise ValueError(f"unknown SIGN_VARIANT: {v}")
-
-
-def sign_envelope(key: bytes, msg: bytes) -> str:
-    """HMAC-SHA256 then standard Base64 (client uses encoding/base64.EncodeToString)."""
-    digest = hmac.new(key, msg, hashlib.sha256).digest()
-    return base64.b64encode(digest).decode()
+    if v == "v3_token_bearer":
+        parts = [
+            "v1",
+            method_u,
+            path_n,
+            request_id,
+            str(ts),
+            nonce_field,
+            pub,
+            ciphertext,
+            f"Bearer {access_token}" if access_token else "",
+        ]
+        return join(parts)
+    if v == "v3_token_early":
+        parts = [
+            "v1",
+            method_u,
+            path_n,
+            access_token or "",
+            request_id,
+            str(ts),
+            nonce_field,
+            pub,
+            ciphertext,
+        ]
+        return join(parts)
+    if v == "v2_nul_full":
+        return join(
+            ["v1", method_u, path_n, request_id, str(ts), nonce_field, pub, ciphertext]
+        )
+    if v == "v2_nl_full":
+        return "\n".join(
+            ["v1", method_u, path_n, request_id, str(ts), nonce_field, pub, ciphertext]
+        ).encode()
+    raise ValueError(v)
 
 
 def seal_json(
@@ -180,6 +213,7 @@ def seal_json(
     body: bytes | dict[str, Any] | None = None,
     *,
     ts: int | None = None,
+    access_token: str = "",
 ) -> tuple[dict[str, Any], dict[str, str]]:
     if body is None:
         plaintext = b"{}"
@@ -192,87 +226,45 @@ def seal_json(
     if not plaintext:
         plaintext = b"{}"
 
+    # Allow token from env for probes / systemd if not passed
+    if not access_token:
+        access_token = os.environ.get("HYPERDOWN_ACCESS_TOKEN", "")
+
     ts = int(time.time()) if ts is None else int(ts)
-    nonce_hex = secrets.token_hex(16)
+    request_id = secrets.token_hex(16)
     aead_nonce = secrets.token_bytes(24)
 
     method_u = method.upper()
     path_n = normalize_api_path(path)
-    key = derive_key(method_u, path_n, ts, nonce_hex)
-    aad = associated_data(method_u, path_n, ts, nonce_hex)
 
+    shared, pub_hex = _ecdh_shared()
+    key = derive_key(shared, method_u, path_n, ts, request_id)
+    aad = associated_data(method_u, path_n, ts, request_id)
     sealed = crypto_aead_xchacha20poly1305_ietf_encrypt(
         plaintext, aad, aead_nonce, key
     )
-    aead_b64 = base64.b64encode(aead_nonce).decode()
 
-    wire = WIRE_VARIANT
-    if wire == "nonce_hex_ct_b64":
-        nonce_field, ct_field = nonce_hex, base64.b64encode(sealed).decode()
-    elif wire == "nonce_hex_ct_hex":
-        nonce_field, ct_field = nonce_hex, sealed.hex()
-    elif wire == "nonce_hex_ct_b64_n24ct":
-        # AEAD nonce must reach the server somehow — prepend is the usual pattern
-        nonce_field = nonce_hex
-        ct_field = base64.b64encode(aead_nonce + sealed).decode()
-    elif wire == "nonce_hex_ct_hex_n24ct":
-        nonce_field = nonce_hex
-        ct_field = (aead_nonce + sealed).hex()
-    elif wire == "nonce_b64_ct_b64":
-        nonce_field = aead_b64
-        ct_field = base64.b64encode(sealed).decode()
-    elif wire == "nonce_b64_ct_hex":
-        nonce_field = aead_b64
-        ct_field = sealed.hex()
-    else:
-        raise ValueError(f"unknown WIRE_VARIANT: {wire}")
-
+    nonce_field = b64encode_field(aead_nonce)
+    ct_field = b64encode_field(sealed)
     msg = build_sign_message(
         method_u,
         path_n,
         ts,
-        nonce_hex,
+        request_id,
+        nonce_field,
+        pub_hex,
         ct_field,
-        aead_nonce_b64=aead_b64,
-        nonce_field=nonce_field,
+        access_token=access_token,
     )
+    sig = b64encode_field(hmac.new(key, msg, hashlib.sha256).digest())
+
     envelope = {
+        "v": "v1",
+        "request_id": request_id,
         "ts": ts,
         "nonce": nonce_field,
+        "pub": pub_hex,
         "ciphertext": ct_field,
-        "sign": sign_envelope(key, msg),
+        "sign": sig,
     }
     return envelope, {"X-Hyperdown-Secure": SECURE_HEADER}
-
-
-def probe_matrix() -> list[tuple[str, str, str]]:
-    """Return (kdf, wire, sign) combos worth trying."""
-    kdfs = [
-        "re_primary",
-        "salt_digest_info_method_path",
-        "salt_prefix_info_digest",
-        "salt_prefix_info_material",
-        "salt_prefix_info_method_path",
-    ]
-    wires = [
-        "nonce_hex_ct_b64_n24ct",
-        "nonce_hex_ct_b64",
-        "nonce_hex_ct_hex",
-        "nonce_b64_ct_b64",
-        "nonce_hex_ct_hex_n24ct",
-        "nonce_b64_ct_hex",
-    ]
-    signs = [
-        "v1_nl_method_path_nonce_ts_ct",
-        "v1_nl_method_path_ts_nonce_ct",
-        "v1_nl_aad_ct",
-        "v1_nl_method_path_nonce_ts_ct_aead",
-        "v1_nl_method_path_nfield_ts_ct",
-    ]
-    # Prefer RE-primary combinations first
-    out: list[tuple[str, str, str]] = []
-    for k in kdfs:
-        for w in wires:
-            for s in signs:
-                out.append((k, w, s))
-    return out

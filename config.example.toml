@@ -5,7 +5,7 @@
 api_base_url = "https://hyperdown.net"
 email = "you@example.com"
 password = "your-password"
-user_agent = "Mozilla/5.0 Hyperdown/3.0"
+user_agent = "Go-http-client/1.1"
 
 # 可选 HTTP/HTTPS 代理
 # proxy = "http://127.0.0.1:7890"
