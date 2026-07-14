@@ -1,192 +1,136 @@
 # Hyperdown 每日自动签到
 
-基于 Hyperdown 桌面客户端（v1.1.3）逆向的 **Python 3** 签到脚本。  
-通过 `https://hyperdown.net/api/v1` 完成登录、查询与每日签到，领取免费高速流量。
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
+[![License: Personal Use](https://img.shields.io/badge/license-personal%20use-lightgrey.svg)](#许可与免责)
 
-> **适用场景**：本机定时 / 云服务器（systemd timer 或 cron）。  
-> **不依赖** Windows 官方客户端即可跑登录与「今日是否已签到」逻辑。
+用 **Python 3** 在 Linux 云服务器上自动完成 [Hyperdown](https://hyperdown.net) 每日签到，领取免费高速流量。  
+协议对齐官方桌面客户端（v1.1.3）的登录 / 查询 / 安全签到接口，**不依赖** Windows 客户端常驻运行。
 
----
-
-## 目录
-
-1. [功能说明](#1-功能说明)
-2. [环境要求](#2-环境要求)
-3. [本机快速使用（分步）](#3-本机快速使用分步)
-4. [云服务器部署（推荐，分步）](#4-云服务器部署推荐分步)
-5. [日常运维与如何确认成功](#5-日常运维与如何确认成功)
-6. [命令行参数与退出码](#6-命令行参数与退出码)
-7. [环境变量一览](#7-环境变量一览)
-8. [当前能力与已知限制](#8-当前能力与已知限制)
-9. [安全与合规](#9-安全与合规)
-10. [项目结构](#10-项目结构)
+| 你想做什么 | 直接看 |
+|------------|--------|
+| 在 VPS 上装好、每天自动跑 | [一、云服务器部署（推荐）](#一云服务器部署推荐) |
+| 本机临时试跑 | [二、本机快速使用](#二本机快速使用) |
+| 看日志、改时间、排错 | [三、日常运维](#三日常运维) |
+| 参数 / 退出码 / 环境变量 | [四、参考](#四参考) |
+| 安全封包原理 | [STATUS.md](./STATUS.md) |
 
 ---
 
-## 1. 功能说明
-
-| 功能 | 说明 |
-|------|------|
-| 邮箱 + 密码登录 | 自动保存 / 刷新 `tokens.json` |
-| 查询账号 | 流量余额、今日是否已签到等 |
-| 每日签到 | 调用 `POST /me/checkins`（需安全封包） |
-| 幂等 | 今日已签到则直接成功退出（适合 cron） |
-| 云部署 | 一键 `install.sh` + systemd timer（默认每天约 08:05） |
-| 日志 | 写入 `logs/checkin.log`，云上另有 `journalctl` |
-
----
-
-## 2. 环境要求
-
-- **Python 3.8+**（推荐 3.10 / 3.11 / 3.12）
-  - 3.11+ 使用标准库 `tomllib`
-  - 更低版本自动使用 `tomli`（已写入 `requirements.txt`）
-- 能访问 `https://hyperdown.net`
-- 云服务器建议开启 **NTP**，时区 **Asia/Shanghai**（签到与安全校验依赖时间）
-
-依赖包（`requirements.txt`）：
+## 它做什么
 
 ```text
-cryptography
-PyNaCl
-tomli   # 仅 Python < 3.11 需要
+登录（邮箱+密码） → 查询是否已签到 → 未签则 POST /me/checkins（安全封包）→ 写日志退出
+```
+
+| 能力 | 说明 |
+|------|------|
+| 登录 / 刷新 token | 自动落盘 `tokens.json`（权限 600） |
+| 查询账号 | 流量余额、今日是否已签到 |
+| 安全签到 | 复现官方 `SealJSON`（ECDH + HKDF + XChaCha20 + HMAC） |
+| 幂等 | 今日已签到 → 直接 **exit 0**（适合 timer / cron） |
+| 云部署 | `deploy/install.sh` + systemd timer（默认约 **08:05**） |
+
+签到接口需要带 `X-Hyperdown-Secure: v1` 的加密信封；本仓库默认算法已与官方抓包对齐，可直接用于生产定时任务。细节见 [STATUS.md](./STATUS.md)。
+
+---
+
+## 环境要求
+
+- **Python 3.8+**（推荐 3.10 / 3.11 / 3.12）
+- 能访问 `https://hyperdown.net`
+- 云服务器建议：**时区 `Asia/Shanghai` + NTP 开启**（签名里的时间戳会校验）
+
+依赖（`requirements.txt`）：
+
+```text
+cryptography>=42
+PyNaCl>=1.5
+tomli>=2.0          # 仅 Python < 3.11
 ```
 
 ---
 
-## 3. 本机快速使用（分步）
+## 一、云服务器部署（推荐）
 
-### 步骤 1：获取代码
+适合 Ubuntu / Debian / CentOS 等 Linux VPS。  
+账号密码只放在服务器 `/etc/hyperdown-checkin.env`，**不要**写进 Git。
+
+### 1. 获取代码
 
 ```bash
 git clone https://github.com/jasper0507/hyperdown-checkin.git
 cd hyperdown-checkin
 ```
 
-若仓库为私有，请先配置好 GitHub 登录（HTTPS Token 或 SSH 密钥）。
-
-### 步骤 2：创建虚拟环境并安装依赖
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 步骤 3：填写账号配置
-
-```bash
-cp config.example.toml config.toml
-chmod 600 config.toml
-# 用编辑器打开 config.toml，填写 email / password
-```
-
-`config.example.toml` 示例字段：
-
-```toml
-api_base_url = "https://hyperdown.net"
-email = "you@example.com"
-password = "your-password"
-user_agent = "Go-http-client/1.1"
-# proxy = "http://127.0.0.1:7890"   # 可选
-```
-
-也可用环境变量代替文件（见 [第 7 节](#7-环境变量一览)）。
-
-### 步骤 4：试跑
-
-```bash
-# 仅登录，写出 tokens.json
-python3 checkin.py --login-only
-
-# 查看账号信息（流量、是否已签到）
-python3 checkin.py --me-only
-
-# 执行签到（默认）
-python3 checkin.py
-```
-
-### 步骤 5：看日志
-
-```bash
-tail -f logs/checkin.log
-```
-
-### 步骤 6（可选）：本机定时
-
-- **Linux cron**：可参考 `deploy/crontab.example`
-- **Windows**：任务计划程序每天执行 `python checkin.py`（工作目录设为项目根）
-
----
-
-## 4. 云服务器部署（推荐，分步）
-
-适合任意 Linux VPS（Ubuntu / Debian / CentOS 等）。账号密码放在服务器环境文件中，**不要**提交到 Git。
-
-### 步骤 1：把代码放到服务器
-
-任选一种方式：
-
-```bash
-# 方式 A：在服务器上 clone
-git clone https://github.com/jasper0507/hyperdown-checkin.git
-cd hyperdown-checkin
-
-# 方式 B：从本机打包上传
-scp -r hyperdown-checkin user@your-vps:/tmp/
-ssh user@your-vps
-cd /tmp/hyperdown-checkin
-```
-
-### 步骤 2：一键安装
+### 2. 一键安装
 
 ```bash
 sudo bash deploy/install.sh
 ```
 
-安装脚本会：
+脚本会：
 
 1. 创建系统用户 `hyperdown`
-2. 代码安装到 `/opt/hyperdown-checkin`，并创建 venv、安装依赖
-3. 写入 systemd 单元：`hyperdown-checkin.service` / `hyperdown-checkin.timer`
-4. 若尚无密钥文件，复制模板到 `/etc/hyperdown-checkin.env`（权限 600）
-5. 启用定时器（默认每天 **08:05**，带约 2 分钟随机抖动）
+2. 安装代码到 `/opt/hyperdown-checkin`，创建 venv 并装依赖
+3. 安装 systemd 单元：`hyperdown-checkin.service` / `hyperdown-checkin.timer`
+4. 若尚无密钥文件，从模板生成 `/etc/hyperdown-checkin.env`（`chmod 600`）
+5. 启用定时器（默认每天 **08:05**，约 2 分钟随机抖动）
 
-### 步骤 3：填写邮箱与密码
+> `install.sh` 使用 `rsync --delete` 同步源码树；`config.toml` / `tokens.json` / `.venv` / `logs` 已排除，不会被清掉。
+
+### 3. 填写账号
 
 ```bash
 sudo nano /etc/hyperdown-checkin.env
-# 至少设置：
-#   HYPERDOWN_EMAIL=你的邮箱
-#   HYPERDOWN_PASSWORD=你的密码
+```
+
+至少配置：
+
+```bash
+HYPERDOWN_EMAIL=you@example.com
+HYPERDOWN_PASSWORD=your-password
+```
+
+```bash
 sudo chmod 600 /etc/hyperdown-checkin.env
 ```
 
-### 步骤 4：配置时区与 NTP（重要）
+### 4. 时区与 NTP（重要）
 
 ```bash
 sudo timedatectl set-timezone Asia/Shanghai
 sudo timedatectl set-ntp true
-timedatectl   # 确认 NTP synchronized: yes
+timedatectl   # 确认 System clock synchronized: yes
 ```
 
-### 步骤 5：立刻试跑一次
+### 5. 立刻试跑
 
 ```bash
 sudo systemctl start hyperdown-checkin.service
-sudo journalctl -u hyperdown-checkin.service -n 50 --no-pager
+sudo journalctl -u hyperdown-checkin.service -n 40 --no-pager
 ```
 
-### 步骤 6：确认定时器已启用
+成功时常见两类日志：
+
+```text
+# 未签到日
+开始签到（KDF=ecdh_re_primary, SIGN=v3_token_nul, B64=rawurl）…
+签到成功！本次奖励 …
+
+# 已签到日（幂等）
+今日已签到。流量余额 …，累计签到流量 …
+```
+
+### 6. 确认定时器
 
 ```bash
-systemctl list-timers hyperdown-checkin.timer
-systemctl is-enabled hyperdown-checkin.timer
+systemctl is-enabled hyperdown-checkin.timer   # enabled
+systemctl list-timers hyperdown-checkin.timer  # 看 NEXT
 ```
 
-### 步骤 7（可选）：从开发机同步更新
+### 从其他机器更新服务器代码
 
-在**开发机项目根目录**执行（按你的 SSH 配置改环境变量）：
+在**已 clone 的开发机**项目根目录：
 
 ```bash
 export KEY=/path/to/your.pem
@@ -194,220 +138,206 @@ export HOST=user@your-vps-ip
 bash deploy/sync-and-verify.sh
 ```
 
-也可手动 `rsync` / `scp` 后再在服务器上 `sudo systemctl start hyperdown-checkin.service`。
-
-### 备选：不用 systemd，改用 cron
-
-见 `deploy/crontab.example`。环境变量放在 `/etc/hyperdown-checkin.env`，crontab 中 `source` 后执行即可。
-
-### Docker（可选，无官方镜像）
-
-可自行构建：
-
-```dockerfile
-FROM python:3.12-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-CMD ["python", "checkin.py"]
-```
-
-再用宿主机 cron 或外部调度每天：
+或在服务器上直接：
 
 ```bash
-docker run --rm --env-file .env your-image
-```
-
----
-
-## 5. 日常运维与如何确认成功
-
-### 手动再跑一次
-
-```bash
+cd /opt/hyperdown-checkin   # 若用 git 部署
+sudo git pull               # 仅当你以 git 方式维护该目录时
+# 更常见：本机 scp / rsync 三个 py + requirements 后：
 sudo systemctl start hyperdown-checkin.service
 ```
 
-### 看服务日志（推荐）
+### 不用 systemd？用 cron
+
+见 [`deploy/crontab.example`](./deploy/crontab.example)。  
+注意：`/etc/hyperdown-checkin.env` 通常为 `root:root 600`，请用 **root 的 crontab** `source` 该文件。
+
+---
+
+## 二、本机快速使用
+
+适合临时验证账号或调试，**生产仍推荐上节的 systemd 方案**。
 
 ```bash
+git clone https://github.com/jasper0507/hyperdown-checkin.git
+cd hyperdown-checkin
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+cp config.example.toml config.toml
+chmod 600 config.toml
+# 编辑 config.toml，填写 email / password
+
+python3 checkin.py --login-only    # 仅登录
+python3 checkin.py --me-only       # 查流量 / 是否已签
+python3 checkin.py                 # 登录 + 签到
+```
+
+也可用环境变量代替 `config.toml`：
+
+```bash
+export HYPERDOWN_EMAIL=you@example.com
+export HYPERDOWN_PASSWORD=your-password
+python3 checkin.py
+```
+
+日志：`logs/checkin.log`。
+
+---
+
+## 三、日常运维
+
+### 常用命令
+
+```bash
+# 立刻再跑一次
+sudo systemctl start hyperdown-checkin.service
+
+# 服务日志（推荐）
 sudo journalctl -u hyperdown-checkin.service -n 50 --no-pager
-# 持续跟踪
 sudo journalctl -u hyperdown-checkin.service -f
-```
 
-### 看应用日志文件
+# 应用日志文件
+sudo tail -f /opt/hyperdown-checkin/logs/checkin.log
 
-```bash
-tail -f /opt/hyperdown-checkin/logs/checkin.log
-```
-
-### 成功示例（今日已签到，幂等成功）
-
-```text
-[日期时间] 已登录: ... | 流量 x.xx GB | 今日已签到=True
-[日期时间] 今日已签到。流量余额 ...，累计签到流量 ...
-```
-
-此时 `systemctl` 的 `Result=success`、`ExecMainStatus=0`。
-
-### 查看下次定时触发
-
-```bash
+# 下次触发时间
 systemctl list-timers hyperdown-checkin.timer
+
+# 停用 / 启用定时
+sudo systemctl disable --now hyperdown-checkin.timer
+sudo systemctl enable --now hyperdown-checkin.timer
 ```
 
-### 修改定时时间
+### 修改每天几点跑
 
 ```bash
 sudo systemctl edit hyperdown-checkin.timer
-# 或编辑 /etc/systemd/system/hyperdown-checkin.timer 中的 OnCalendar
+# 或编辑 /etc/systemd/system/hyperdown-checkin.timer 中的 OnCalendar=
 sudo systemctl daemon-reload
 sudo systemctl restart hyperdown-checkin.timer
 ```
 
-### 停用定时
+### 强制打签到 API（调试封包）
+
+即使账号显示「今日已签到」，也可强制请求（服务端若已签仍返回业务码，脚本 **exit 0**）：
 
 ```bash
-sudo systemctl disable --now hyperdown-checkin.timer
+sudo bash -c 'set -a; source /etc/hyperdown-checkin.env; set +a; \
+  sudo -u hyperdown env \
+    HYPERDOWN_EMAIL="$HYPERDOWN_EMAIL" \
+    HYPERDOWN_PASSWORD="$HYPERDOWN_PASSWORD" \
+    /opt/hyperdown-checkin/.venv/bin/python /opt/hyperdown-checkin/checkin.py --force'
 ```
 
-### 故障对照（简表）
+> 不要用 `sudo -u hyperdown source /etc/hyperdown-checkin.env`：env 文件多为 root 可读，hyperdown 用户读不到。
+
+### 故障对照
 
 | 现象 | 可能原因 | 处理 |
 |------|----------|------|
-| 配置错误 / 退出码 1 | 未写 env 或 config | 检查 `/etc/hyperdown-checkin.env` 或 `config.toml` |
-| 鉴权失败 / 退出码 2 | 邮箱密码错误 | 改密码后重试登录 |
-| 网络错误 / 退出码 4 | 出网 / DNS / 代理 | 检查服务器能否访问 hyperdown.net |
-| `secure_request_invalid` / 退出码 3 | 封包被服务端拒绝 | 确认 NTP/时区；勿在 env 中设置旧版 `HYPERDOWN_*_VARIANT`；见 [STATUS.md](./STATUS.md) |
-| Python 报缺 `tomllib` | 系统 Python &lt; 3.11 且未装 tomli | 在 venv 中 `pip install tomli`，或跑 `deploy/remote-fix-tomllib.sh` |
+| 退出码 1 | 未配置账号 | 检查 `/etc/hyperdown-checkin.env` 或 `config.toml` |
+| 退出码 2 | 邮箱/密码错误或 token 失效 | 改密码后重跑；删 `tokens.json` 再登录 |
+| 退出码 4 | 出网 / DNS / 代理 | 在服务器上 `curl -I https://hyperdown.net` |
+| 退出码 3 / `secure_request_invalid` | 时间不准，或 env 里残留错误 `HYPERDOWN_*_VARIANT` | 开 NTP；去掉调试用变体变量；见 [STATUS.md](./STATUS.md) |
+| 缺 `tomllib` | 系统 Python &lt; 3.11 且无 tomli | venv 中 `pip install tomli`，或 `deploy/remote-fix-tomllib.sh` |
 
 ---
 
-## 6. 命令行参数与退出码
+## 四、参考
 
-### 参数
+### 命令行
 
 | 参数 | 含义 |
 |------|------|
 | （无） | 登录 + 签到 |
 | `--login-only` | 仅登录并保存 token |
 | `--me-only` | 仅查询用户信息 |
-| `--force` | 即使已签到也强制再调签到接口（服务端已签到仍 exit 0） |
-| `--config PATH` | 指定配置文件路径 |
+| `--force` | 忽略本地「已签到」标志，仍请求签到 API |
+| `--config PATH` | 指定配置文件 |
 
 ### 退出码
 
 | Code | 含义 |
 |------|------|
-| 0 | 签到成功，或今日已签到 |
+| 0 | 签到成功，或今日已签到（幂等成功） |
 | 1 | 配置错误 |
 | 2 | 登录 / 鉴权失败 |
 | 3 | 签到或安全封包失败 |
 | 4 | 网络错误 |
 
----
+### 环境变量
 
-## 7. 环境变量一览
-
-生产环境只需账号密码（云上写入 `/etc/hyperdown-checkin.env`，`chmod 600`）：
+**生产只需：**
 
 | 变量 | 含义 |
 |------|------|
 | `HYPERDOWN_EMAIL` | 登录邮箱 |
 | `HYPERDOWN_PASSWORD` | 登录密码 |
-| `HYPERDOWN_API_BASE` | API 根，默认 `https://hyperdown.net` |
-| `HYPERDOWN_PROXY` | HTTP/HTTPS 代理 |
-| `HYPERDOWN_USER_AGENT` | 默认 `Go-http-client/1.1`（与官方客户端一致） |
 
-调试用（**默认已通过服务端校验，生产请勿设置**）：
+**可选：**
 
 | 变量 | 默认 | 含义 |
 |------|------|------|
-| `HYPERDOWN_KDF_VARIANT` | `ecdh_re_primary` | KDF 变体 |
-| `HYPERDOWN_SIGN_VARIANT` | `v3_token_nul` | 签名字段拼法 |
-| `HYPERDOWN_B64_VARIANT` | `rawurl` | Raw URL-safe Base64（无 padding） |
-| `HYPERDOWN_SIGN_SEP` | `nul` | 签名字段分隔符 |
-| `HYPERDOWN_SECURE_PEER_PUB` | 内嵌 hex | 覆盖对端 X25519 **公钥**（非账号密钥） |
-| `HYPERDOWN_SECURE_MASTER_KEY` | （同上别名） | 兼容旧名，优先使用 `PEER_PUB` |
+| `HYPERDOWN_API_BASE` | `https://hyperdown.net` | API 根 |
+| `HYPERDOWN_PROXY` | （空） | HTTP(S) 代理 |
+| `HYPERDOWN_USER_AGENT` | `Go-http-client/1.1` | 与官方客户端一致 |
 
-云上推荐只写 env 文件，无需 `config.toml`。
+**调试用（生产请勿设置；代码内默认已通过服务端校验）：**
 
----
+| 变量 | 默认 |
+|------|------|
+| `HYPERDOWN_KDF_VARIANT` | `ecdh_re_primary` |
+| `HYPERDOWN_SIGN_VARIANT` | `v3_token_nul` |
+| `HYPERDOWN_B64_VARIANT` | `rawurl` |
+| `HYPERDOWN_SECURE_PEER_PUB` | 内嵌对端 X25519 公钥 hex |
 
-## 8. 当前能力与已知限制
-
-更细的算法与运维说明见 [STATUS.md](./STATUS.md)。
-
-| 能力 | 状态 | 说明 |
-|------|------|------|
-| 登录 / 刷新 token | ✅ | `POST /auth/login`、`/auth/refresh` |
-| 查询用户 / 是否已签到 | ✅ | `GET /me/` |
-| 今日已签到 → 退出 0 | ✅ | 幂等，适合 cron / timer |
-| 真正发起签到 API | ✅ | 安全封包已对齐官方抓包；服务端已签到时 `--force` 仍 exit 0 |
-| systemd 定时触发 | ✅ | 默认约每天 08:05（本地时区） |
-
-### 安全封包（签到接口）
-
-`POST /api/v1/me/checkins` 使用与官方 `SealJSON` 一致的信封（详见 STATUS.md）：
-
-| 项 | 值 |
-|----|-----|
-| Header | `X-Hyperdown-Secure: v1` |
-| 密钥协商 | 临时 X25519 + ECDH（对端公钥内嵌） |
-| 派生 | HKDF-SHA256 |
-| 加密 | XChaCha20-Poly1305 |
-| 签名 | HMAC-SHA256（含 **access_token**） |
-| 字段编码 | nonce / ciphertext / sign = **Raw URL Base64** |
-| Envelope | `v, request_id, ts, nonce, pub, ciphertext, sign` |
-| User-Agent | `Go-http-client/1.1` |
-| 登录 | **无需**封包 |
-
-### 运维注意
-
-1. 保持服务器 **NTP** 与建议时区 **Asia/Shanghai**（`ts` 参与校验）
-2. `/etc/hyperdown-checkin.env` 勿残留旧版 `HYPERDOWN_WIRE_VARIANT` 等无效变量
-3. 已签到日默认只查询并 exit 0；未签到日才会真正打签到接口
-4. 官方客户端升级后协议可能变化，届时需对照抓包更新 `secure_api.py`
+完整算法与服务器运维备忘：[STATUS.md](./STATUS.md)。
 
 ---
 
-## 9. 安全与合规
-
-- **切勿**把 `config.toml`、`tokens.json`、`/etc/hyperdown-checkin.env`、私钥（`*.pem`）提交到 Git（见 `.gitignore`）
-- 服务器上密钥文件请保持 `chmod 600`（`install.sh` 会强制设置）
-- 手动调试请用 `sudo systemctl start hyperdown-checkin.service`，勿以 `hyperdown` 用户直接 `source` root 持有的 env
-- 自动化可能违反服务条款，请**仅限个人学习 / 自用**
-- 客户端升级后协议可能变化，届时需重新对照官方客户端
-- 内嵌 `PEER_PUB` 是官方客户端中的 **X25519 公钥材料**，不是你的账号密码
-
----
-
-## 10. 项目结构
+## 五、项目结构
 
 ```text
 hyperdown-checkin/
 ├── checkin.py                 # 入口：登录 / 查询 / 签到
 ├── client.py                  # HTTP API 客户端
-├── secure_api.py              # SealJSON 安全封包复现
-├── config.example.toml        # 配置模板（复制为 config.toml）
+├── secure_api.py              # 官方 SealJSON 安全封包复现
+├── config.example.toml        # 本机配置模板 → 复制为 config.toml
 ├── requirements.txt
-├── README.md                  # 本说明
-├── STATUS.md                  # 算法与运维终态
-├── .gitignore
+├── README.md                  # 本文件
+├── STATUS.md                  # 算法终态与运维备忘
+├── .gitignore                 # 忽略密钥、token、日志、venv
 └── deploy/
     ├── install.sh             # 云服务器一键安装
-    ├── sync-and-verify.sh     # 从开发机同步并验证
-    ├── remote-fix-tomllib.sh  # 旧 Python / tomli 修复
+    ├── sync-and-verify.sh     # 开发机同步到 VPS 并试跑
     ├── hyperdown-checkin.service
     ├── hyperdown-checkin.timer
-    ├── env.example            # 云环境变量模板
-    └── crontab.example        # cron 备选
+    ├── env.example            # /etc/hyperdown-checkin.env 模板
+    ├── crontab.example        # 不用 systemd 时的 cron 示例
+    └── remote-fix-tomllib.sh  # 旧 Python / tomli 修复
 ```
+
+运行时数据（**不进仓库**）：
+
+| 路径 | 用途 |
+|------|------|
+| `config.toml` / `tokens.json` | 本机账号与 token |
+| `/etc/hyperdown-checkin.env` | 云上账号（systemd `EnvironmentFile`） |
+| `logs/checkin.log` | 应用日志 |
+
+---
+
+## 六、安全与合规
+
+1. **禁止**将 `config.toml`、`tokens.json`、`/etc/hyperdown-checkin.env`、SSH 私钥（`*.pem`）提交到 Git。  
+2. 云上密钥文件保持 `chmod 600`；`install.sh` 会强制设置。  
+3. 内嵌的 peer 公钥是官方客户端中的 **X25519 公钥材料**，不是你的账号密码。  
+4. 官方客户端升级后，签到协议可能变化，需重新对照抓包更新 `secure_api.py`。  
+5. 自动化可能违反服务条款，请**仅限个人学习与自用**。
 
 ---
 
 ## 许可与免责
 
-本项目仅供个人学习与自用。使用本脚本产生的任何账号风险、服务条款问题，由使用者自行承担。
+本项目仅供个人学习与自用。使用本脚本产生的任何账号风险、服务条款问题或数据损失，由使用者自行承担。

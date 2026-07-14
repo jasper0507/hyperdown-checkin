@@ -1,20 +1,40 @@
-# Hyperdown 自动签到 — 最终状态（2026-07-14）
+# 状态与算法备忘
 
-## 结论
+> 面向运维与二次开发。日常使用请先看 [README.md](./README.md)。
 
-**安全封包已打通，服务器定时任务已就绪，技术债已收底。**
+## 结论（2026-07-14）
 
-验证：
+| 项 | 状态 |
+|----|------|
+| 安全签到封包 | ✅ 与官方抓包对齐，服务端接受 |
+| 幂等（已签到 → exit 0） | ✅ 含 `--force` 时服务端 `already_checked_in` |
+| 云上 systemd timer | ✅ 约每天 08:05（本地时区，建议 Asia/Shanghai） |
+| 默认变体 | `KDF=ecdh_re_primary` · `SIGN=v3_token_nul` · `B64=rawurl` |
+| User-Agent | `Go-http-client/1.1` |
 
-- `--force` 调签到 API → 服务端返回 `already_checked_in`（**不再是** `secure_request_invalid`）→ 脚本 exit 0  
-- 正常路径：今日已签到 → 直接 exit 0  
-- `hyperdown-checkin.timer`：enabled + active，约每天 08:05 本地时区（建议 Asia/Shanghai）  
+验证方式：
 
-## 工作算法（对照官方抓包 + 逆向）
+```bash
+# 正常路径
+sudo systemctl start hyperdown-checkin.service
+sudo journalctl -u hyperdown-checkin.service -n 20 --no-pager
+
+# 强制走签到 API（封包路径）
+sudo bash -c 'set -a; source /etc/hyperdown-checkin.env; set +a; \
+  sudo -u hyperdown env HYPERDOWN_EMAIL="$HYPERDOWN_EMAIL" \
+  HYPERDOWN_PASSWORD="$HYPERDOWN_PASSWORD" \
+  /opt/hyperdown-checkin/.venv/bin/python /opt/hyperdown-checkin/checkin.py --force'
+```
+
+期望：`--force` 在已签到日返回「今天已经签到过了」且 **exit 0**（不是 `secure_request_invalid`）。
+
+---
+
+## 工作算法（官方 SealJSON 对齐）
 
 ```text
 1. eph = X25519.GenerateKey()
-2. shared = ECDH(eph.Private, NewPublicKey(embedded_32B_hex))  # 内嵌 hex = 对端公钥
+2. shared = ECDH(eph.Private, NewPublicKey(embedded_32B_hex))  # 内嵌 = 对端公钥
 3. request_id = randomHex(16)
 4. key = HKDF-SHA256(
       ikm  = shared,
@@ -23,8 +43,8 @@
       len  = 32)
 5. aad = METHOD + "\n" + path + "\n" + request_id + "\n" + ts
 6. sealed = XChaCha20-Poly1305.Seal(key, nonce24, body, aad)
-7. Envelope JSON:
-   v=v1, request_id, ts,
+7. Envelope:
+   v, request_id, ts,
    nonce      = RawURLBase64(nonce24),
    pub        = hex(eph.Public),
    ciphertext = RawURLBase64(sealed),   # 无前置 AEAD nonce
@@ -35,40 +55,30 @@
    UA: Go-http-client/1.1
 ```
 
-关键点：签名必须带上 **access_token**（与官方 `SealJSON(method, path, token, body)` 一致）。
+关键点：HMAC 必须包含 **access_token**（与官方 `SealJSON(method, path, token, body)` 一致）。
 
-默认变体（无需设置 env）：
+HTTP 路径：`POST {base}/me/checkins`（base 默认含 `/api/v1`）。  
+封包 path 字符串：`/api/v1/me/checkins`。
 
-| 项 | 值 |
-|----|-----|
-| KDF | `ecdh_re_primary` |
-| SIGN | `v3_token_nul` |
-| B64 | `rawurl` |
+---
 
-## 服务器
+## 服务器布局
 
-| 项 | 值 |
-|----|-----|
+| 项 | 路径 / 值 |
+|----|-----------|
 | 代码 | `/opt/hyperdown-checkin` |
-| 密钥 | `/etc/hyperdown-checkin.env`（`HYPERDOWN_EMAIL` / `HYPERDOWN_PASSWORD`） |
+| 密钥 | `/etc/hyperdown-checkin.env`（仅 EMAIL / PASSWORD 即可） |
 | 定时 | `hyperdown-checkin.timer` ≈ 08:05 |
-| 日志 | `journalctl -u hyperdown-checkin.service` 与 `logs/checkin.log` |
-
-### 运维
+| 日志 | `journalctl -u hyperdown-checkin.service` · `logs/checkin.log` |
+| 运行用户 | `hyperdown`（systemd drop 权限） |
 
 ```bash
-sudo systemctl start hyperdown-checkin.service          # 立刻跑一次
-sudo journalctl -u hyperdown-checkin.service -n 40      # 看结果
-systemctl list-timers hyperdown-checkin.timer
-# 强制打签到 API（已签到日也应 exit 0）
 sudo systemctl start hyperdown-checkin.service
-# 或：
-# KEY=... HOST=user@host bash deploy/sync-and-verify.sh
+sudo journalctl -u hyperdown-checkin.service -n 40 --no-pager
+systemctl list-timers hyperdown-checkin.timer
 ```
 
-手动以 env 试跑时注意：env 文件通常是 root:root `600`，不要用 `sudo -u hyperdown source /etc/...`。
-
-### 成功日志示例
+成功日志示例：
 
 ```text
 已登录: … | 流量 … | 今日已签到=False
@@ -76,25 +86,18 @@ sudo systemctl start hyperdown-checkin.service
 签到成功！本次奖励 …
 ```
 
-或已签到：
+或：
 
 ```text
 今日已签到。…
-# --force 时: 服务端确认今日已签到: 今天已经签到过了
+# --force: 服务端确认今日已签到: 今天已经签到过了
 ```
 
-## 技术债收底清单（已完成）
+---
 
-| 项 | 处理 |
-|----|------|
-| ECDH + token-in-sign 封包 | 默认路径，生产可用 |
-| `already_checked_in` → exit 0 | 含 `--force` |
-| UA 与官方一致 | 默认 `Go-http-client/1.1` |
-| 删除失效 `--probe-secure` 矩阵 | 已移除 |
-| README / env.example 与 STATUS 对齐 | 已更新 |
-| `sync-and-verify.sh` 先 mkdir 再 scp | 已修 |
-| `install.sh` 始终 `chmod 600` env、检查 rsync | 已修 |
-| `.gitignore` 增补 `.env` / `*.pem` / `*.key` | 已修 |
-| 空 token 时签名仍保留末字段 | 已修 |
+## 排错提示
 
-未纳入本仓库（可选后续）：单元测试锁定信封字段与 sign 串布局。
+1. **NTP / 时区**：`timedatectl` 应显示 synchronized + 建议 `Asia/Shanghai`。  
+2. **勿在 env 设置过期调试变量**：如已删除的 `HYPERDOWN_WIRE_VARIANT`、错误 KDF 名。  
+3. **env 权限**：`root:root 600` 正确；手动跑请用 root `source` 后再 `sudo -u hyperdown env …`。  
+4. 客户端大版本升级后协议可能变，需重新抓包对照 `secure_api.py`。
