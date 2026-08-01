@@ -56,52 +56,46 @@ tomli>=2.0          # 仅 Python < 3.11
 
 ## 一、GitHub Actions 部署（推荐）
 
-无需自有 VPS：用本仓库的 [`.github/workflows/checkin.yml`](./.github/workflows/checkin.yml) 每天自动签到。  
+无需自有 VPS：用 [`.github/workflows/checkin.yml`](./.github/workflows/checkin.yml) 每天自动签到；月度保活见 [`keepalive.yml`](./.github/workflows/keepalive.yml)。  
 账号密码只放在 **Repository Secrets**，**不要**写进代码或 commit。
 
-### 1. Fork 或直接用本仓库
+### 1. 配置 Secrets
 
-有写权限的仓库即可（本仓库：`jasper0507/hyperdown-checkin`）。
-
-### 2. 配置 Secrets
-
-仓库 → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**：
+仓库 → **Settings** → **Secrets and variables** → **Actions**：
 
 | Name | 值 |
 |------|-----|
 | `HYPERDOWN_EMAIL` | 登录邮箱 |
 | `HYPERDOWN_PASSWORD` | 登录密码 |
 
-可选：`HYPERDOWN_API_BASE`、`HYPERDOWN_PROXY`（一般不需要）。
-
-CLI 示例（本机已登录 `gh`）：
+（代理等高级项见 [环境变量](#环境变量)；不必为 Actions 单独建 Secret。）
 
 ```bash
-gh secret set HYPERDOWN_EMAIL --repo jasper0507/hyperdown-checkin
-gh secret set HYPERDOWN_PASSWORD --repo jasper0507/hyperdown-checkin
+gh secret set HYPERDOWN_EMAIL -R OWNER/REPO
+gh secret set HYPERDOWN_PASSWORD -R OWNER/REPO
 ```
 
-### 3. 立刻试跑
+### 2. 立刻试跑
 
-仓库 → **Actions** → **Hyperdown Check-in** → **Run workflow**，或：
+**Actions** → **Hyperdown Check-in** → **Run workflow**，或：
 
 ```bash
-gh workflow run checkin.yml --repo jasper0507/hyperdown-checkin
-gh run watch --repo jasper0507/hyperdown-checkin
+gh workflow run checkin.yml -R OWNER/REPO
+gh run watch -R OWNER/REPO
 ```
 
 成功日志应含「签到成功」或「今日已签到」。
 
-### 4. 调度说明
+### 3. 调度
 
-| 触发 | 时间 | 说明 |
-|------|------|------|
-| schedule | UTC `00:05` ≈ 北京 **08:05** | 主签到（对齐原 VPS timer） |
-| schedule | UTC `12:05` ≈ 北京 **20:05** | 备份窗口（幂等，已签则 exit 0） |
-| schedule | 每月 1 日 UTC `00:00` | 空提交保活，降低 schedule 被停用风险 |
-| `workflow_dispatch` | 手动 | 补签 / 验证 |
+| Workflow | 触发 | 时间 | 说明 |
+|----------|------|------|------|
+| `checkin.yml` | schedule | UTC `00:05` ≈ 北京 **08:05** | 主签到 |
+| `checkin.yml` | schedule | UTC `12:05` ≈ 北京 **20:05** | 备份（幂等） |
+| `checkin.yml` | `workflow_dispatch` | 手动 | 补签 / 验证 |
+| `keepalive.yml` | schedule | 每月 1 日 UTC `00:00` | 空提交，降低 schedule 停用风险 |
 
-### 5. 从 VPS 无缝迁过来
+### 4. 从 VPS 无缝迁过来
 
 脚本**幂等**：同一天两边都跑只会领一次奖励。
 
@@ -111,7 +105,6 @@ gh run watch --repo jasper0507/hyperdown-checkin
 
 ```bash
 sudo systemctl disable --now hyperdown-checkin.timer
-# 可选保留 /opt/hyperdown-checkin 与 /etc/hyperdown-checkin.env 作备份
 ```
 
 无需开启 GitHub Pages。
@@ -258,16 +251,7 @@ python3 checkin.py
 
 ### GitHub Actions
 
-```bash
-# 手动跑一次
-gh workflow run checkin.yml --repo jasper0507/hyperdown-checkin
-
-# 看最近运行
-gh run list --workflow=checkin.yml --repo jasper0507/hyperdown-checkin -L 5
-gh run view --log --repo jasper0507/hyperdown-checkin
-```
-
-浏览器：仓库 → Actions → Hyperdown Check-in。
+配置与试跑见 [一、GitHub Actions 部署](#一github-actions-部署推荐)。日常：仓库 **Actions** 页查看 **Hyperdown Check-in** / **Keepalive** 运行记录。
 
 ### VPS（systemd）常用命令
 
@@ -390,7 +374,8 @@ hyperdown-checkin/
 ├── STATUS.md                  # 算法终态与运维备忘
 ├── .gitignore                 # 忽略密钥、token、日志、venv
 ├── .github/workflows/
-│   └── checkin.yml            # GitHub Actions 每日签到
+│   ├── checkin.yml            # 每日签到（schedule + 手动）
+│   └── keepalive.yml          # 月度空提交保活
 └── deploy/
     ├── install.sh             # 云服务器一键安装
     ├── sync-and-verify.sh     # 开发机同步到 VPS 并试跑

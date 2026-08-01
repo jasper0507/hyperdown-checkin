@@ -9,7 +9,8 @@
 | 安全签到封包 | ✅ 与官方抓包对齐，服务端接受 |
 | 幂等（已签到 → exit 0） | ✅ 含 `--force` 时服务端 `already_checked_in` |
 | 云上 systemd timer | ✅ 约每天 08:05（本地时区，建议 Asia/Shanghai） |
-| GitHub Actions | ✅ `.github/workflows/checkin.yml`（UTC 00:05 / 12:05 + 月度保活） |
+| GitHub Actions 签到 | ✅ `checkin.yml`（UTC 00:05 / 12:05 + dispatch） |
+| GitHub Actions 保活 | ✅ `keepalive.yml`（每月 1 日；与签到分文件） |
 | 默认变体 | `KDF=ecdh_re_primary` · `SIGN=v3_token_nul` · `B64=rawurl` |
 | User-Agent | `Go-http-client/1.1` |
 

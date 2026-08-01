@@ -1,0 +1,33 @@
+# 月度空提交，降低「仓库长期无活动导致 schedule 被停用」风险。
+# 与签到解耦：不共享 job if / cron 字符串路由。
+name: Keepalive
+
+on:
+  schedule:
+    - cron: "0 0 1 * *"
+  workflow_dispatch:
+
+concurrency:
+  group: hyperdown-keepalive
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    name: Empty commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Empty commit to keep scheduled workflows active
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keepalive to prevent workflow suspension"
+          git push

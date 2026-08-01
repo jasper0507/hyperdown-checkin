@@ -1,31 +1,27 @@
-# Hyperdown 每日自动签到（GitHub Actions）
-# 注意：GitHub Pages 不能跑定时脚本；签到必须用 Actions schedule。
+# Hyperdown 每日自动签到。
+# 保活见 keepalive.yml（单独 workflow，避免 cron 字符串双源路由）。
 name: Hyperdown Check-in
 
 on:
-  workflow_dispatch: # 手动补签 / 验证
+  workflow_dispatch:
   schedule:
-    # 每天 UTC 00:05 ≈ 北京时间 08:05（与原 systemd timer 对齐）
+    # UTC 00:05 ≈ 北京 08:05（主签到）
     - cron: "5 0 * * *"
-    # 当天备份窗口：UTC 12:05 ≈ 北京时间 20:05（幂等，已签则 exit 0）
+    # UTC 12:05 ≈ 北京 20:05（备份；应用幂等）
     - cron: "5 12 * * *"
-    # 每月 1 号保活，降低「仓库长期无活动导致 schedule 被停用」风险
-    - cron: "0 0 1 * *"
 
 concurrency:
   group: hyperdown-checkin
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   checkin:
     name: Daily check-in
-    # 保活 cron 只跑 keepalive job
-    if: github.event_name != 'schedule' || github.event.schedule != '0 0 1 * *'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
-    permissions:
-      contents: read
 
     steps:
       - name: Checkout
@@ -44,34 +40,10 @@ jobs:
         env:
           HYPERDOWN_EMAIL: ${{ secrets.HYPERDOWN_EMAIL }}
           HYPERDOWN_PASSWORD: ${{ secrets.HYPERDOWN_PASSWORD }}
-          HYPERDOWN_API_BASE: ${{ secrets.HYPERDOWN_API_BASE }}
-          HYPERDOWN_PROXY: ${{ secrets.HYPERDOWN_PROXY }}
         run: |
           set -euo pipefail
           if [ -z "${HYPERDOWN_EMAIL:-}" ] || [ -z "${HYPERDOWN_PASSWORD:-}" ]; then
             echo "::error::缺少 Secrets：请配置 HYPERDOWN_EMAIL 与 HYPERDOWN_PASSWORD"
             exit 1
           fi
-          # 不打印账号；仅输出脚本自身日志
           python checkin.py
-
-  keepalive:
-    name: Monthly keepalive commit
-    if: github.event_name == 'schedule' && github.event.schedule == '0 0 1 * *'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Empty commit to keep scheduled workflows active
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit --allow-empty -m "chore: keepalive to prevent workflow suspension"
-          git push
