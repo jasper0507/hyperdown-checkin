@@ -1,17 +1,21 @@
 # Hyperdown 每日自动签到
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
+[![Hyperdown Check-in](https://github.com/jasper0507/hyperdown-checkin/actions/workflows/checkin.yml/badge.svg)](https://github.com/jasper0507/hyperdown-checkin/actions/workflows/checkin.yml)
 [![License: Personal Use](https://img.shields.io/badge/license-personal%20use-lightgrey.svg)](#许可与免责)
 
-用 **Python 3** 在 Linux 云服务器上自动完成 [Hyperdown](https://hyperdown.net) 每日签到，领取免费高速流量。  
+用 **Python 3** 自动完成 [Hyperdown](https://hyperdown.net) 每日签到，领取免费高速流量。  
 协议对齐官方桌面客户端（v1.1.3）的登录 / 查询 / 安全签到接口，**不依赖** Windows 客户端常驻运行。
+
+> **GitHub Pages 不能跑签到。** 定时执行请用 **GitHub Actions**（本仓库已内置 workflow），或自有 VPS 上的 systemd timer。
 
 | 你想做什么 | 直接看 |
 |------------|--------|
-| 在 VPS 上装好、每天自动跑 | [一、云服务器部署（推荐）](#一云服务器部署推荐) |
-| 本机临时试跑 | [二、本机快速使用](#二本机快速使用) |
-| 看日志、改时间、排错 | [三、日常运维](#三日常运维) |
-| 参数 / 退出码 / 环境变量 | [四、参考](#四参考) |
+| **无服务器，用 GitHub Actions 每天签** | [一、GitHub Actions 部署（推荐）](#一github-actions-部署推荐) |
+| 在 VPS 上装好、每天自动跑 | [二、云服务器部署](#二云服务器部署) |
+| 本机临时试跑 | [三、本机快速使用](#三本机快速使用) |
+| 看日志、改时间、排错 | [四、日常运维](#四日常运维) |
+| 参数 / 退出码 / 环境变量 | [五、参考](#五参考) |
 | 安全封包原理 | [STATUS.md](./STATUS.md) |
 
 ---
@@ -27,8 +31,8 @@
 | 登录 / 刷新 token | 自动落盘 `tokens.json`（权限 600） |
 | 查询账号 | 流量余额、今日是否已签到 |
 | 安全签到 | 复现官方 `SealJSON`（ECDH + HKDF + XChaCha20 + HMAC） |
-| 幂等 | 今日已签到 → 直接 **exit 0**（适合 timer / cron） |
-| 云部署 | `deploy/install.sh` + systemd timer（默认约 **08:05**） |
+| 幂等 | 今日已签到 → 直接 **exit 0**（适合 timer / cron / Actions） |
+| 调度 | GitHub Actions（默认约北京 **08:05** + 晚间备份）或 VPS systemd timer |
 
 签到接口需要带 `X-Hyperdown-Secure: v1` 的加密信封；本仓库默认算法已与官方抓包对齐，可直接用于生产定时任务。细节见 [STATUS.md](./STATUS.md)。
 
@@ -50,7 +54,71 @@ tomli>=2.0          # 仅 Python < 3.11
 
 ---
 
-## 一、云服务器部署（推荐）
+## 一、GitHub Actions 部署（推荐）
+
+无需自有 VPS：用本仓库的 [`.github/workflows/checkin.yml`](./.github/workflows/checkin.yml) 每天自动签到。  
+账号密码只放在 **Repository Secrets**，**不要**写进代码或 commit。
+
+### 1. Fork 或直接用本仓库
+
+有写权限的仓库即可（本仓库：`jasper0507/hyperdown-checkin`）。
+
+### 2. 配置 Secrets
+
+仓库 → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**：
+
+| Name | 值 |
+|------|-----|
+| `HYPERDOWN_EMAIL` | 登录邮箱 |
+| `HYPERDOWN_PASSWORD` | 登录密码 |
+
+可选：`HYPERDOWN_API_BASE`、`HYPERDOWN_PROXY`（一般不需要）。
+
+CLI 示例（本机已登录 `gh`）：
+
+```bash
+gh secret set HYPERDOWN_EMAIL --repo jasper0507/hyperdown-checkin
+gh secret set HYPERDOWN_PASSWORD --repo jasper0507/hyperdown-checkin
+```
+
+### 3. 立刻试跑
+
+仓库 → **Actions** → **Hyperdown Check-in** → **Run workflow**，或：
+
+```bash
+gh workflow run checkin.yml --repo jasper0507/hyperdown-checkin
+gh run watch --repo jasper0507/hyperdown-checkin
+```
+
+成功日志应含「签到成功」或「今日已签到」。
+
+### 4. 调度说明
+
+| 触发 | 时间 | 说明 |
+|------|------|------|
+| schedule | UTC `00:05` ≈ 北京 **08:05** | 主签到（对齐原 VPS timer） |
+| schedule | UTC `12:05` ≈ 北京 **20:05** | 备份窗口（幂等，已签则 exit 0） |
+| schedule | 每月 1 日 UTC `00:00` | 空提交保活，降低 schedule 被停用风险 |
+| `workflow_dispatch` | 手动 | 补签 / 验证 |
+
+### 5. 从 VPS 无缝迁过来
+
+脚本**幂等**：同一天两边都跑只会领一次奖励。
+
+1. 配好 Secrets，手动 Run 一次确认成功  
+2. **过渡 1–2 天**：VPS timer 与 Actions **同时开着**（推荐）  
+3. 确认 Actions 的 schedule 至少成功一次后，再停 VPS：
+
+```bash
+sudo systemctl disable --now hyperdown-checkin.timer
+# 可选保留 /opt/hyperdown-checkin 与 /etc/hyperdown-checkin.env 作备份
+```
+
+无需开启 GitHub Pages。
+
+---
+
+## 二、云服务器部署
 
 适合 Ubuntu / Debian / CentOS 等 Linux VPS。  
 账号密码只放在服务器 `/etc/hyperdown-checkin.env`，**不要**写进 Git。
@@ -154,9 +222,9 @@ sudo systemctl start hyperdown-checkin.service
 
 ---
 
-## 二、本机快速使用
+## 三、本机快速使用
 
-适合临时验证账号或调试，**生产仍推荐上节的 systemd 方案**。
+适合临时验证账号或调试。生产优先用 [GitHub Actions](#一github-actions-部署推荐) 或 [VPS systemd](#二云服务器部署)。
 
 ```bash
 git clone https://github.com/jasper0507/hyperdown-checkin.git
@@ -186,9 +254,22 @@ python3 checkin.py
 
 ---
 
-## 三、日常运维
+## 四、日常运维
 
-### 常用命令
+### GitHub Actions
+
+```bash
+# 手动跑一次
+gh workflow run checkin.yml --repo jasper0507/hyperdown-checkin
+
+# 看最近运行
+gh run list --workflow=checkin.yml --repo jasper0507/hyperdown-checkin -L 5
+gh run view --log --repo jasper0507/hyperdown-checkin
+```
+
+浏览器：仓库 → Actions → Hyperdown Check-in。
+
+### VPS（systemd）常用命令
 
 ```bash
 # 立刻再跑一次
@@ -244,7 +325,7 @@ sudo bash -c 'set -a; source /etc/hyperdown-checkin.env; set +a; \
 
 ---
 
-## 四、参考
+## 五、参考
 
 ### 命令行
 
@@ -296,7 +377,7 @@ sudo bash -c 'set -a; source /etc/hyperdown-checkin.env; set +a; \
 
 ---
 
-## 五、项目结构
+## 六、项目结构
 
 ```text
 hyperdown-checkin/
@@ -308,6 +389,8 @@ hyperdown-checkin/
 ├── README.md                  # 本文件
 ├── STATUS.md                  # 算法终态与运维备忘
 ├── .gitignore                 # 忽略密钥、token、日志、venv
+├── .github/workflows/
+│   └── checkin.yml            # GitHub Actions 每日签到
 └── deploy/
     ├── install.sh             # 云服务器一键安装
     ├── sync-and-verify.sh     # 开发机同步到 VPS 并试跑
@@ -324,17 +407,19 @@ hyperdown-checkin/
 |------|------|
 | `config.toml` / `tokens.json` | 本机账号与 token |
 | `/etc/hyperdown-checkin.env` | 云上账号（systemd `EnvironmentFile`） |
-| `logs/checkin.log` | 应用日志 |
+| GitHub Actions Secrets | `HYPERDOWN_EMAIL` / `HYPERDOWN_PASSWORD` |
+| `logs/checkin.log` | 应用日志（VPS / 本机） |
 
 ---
 
-## 六、安全与合规
+## 七、安全与合规
 
 1. **禁止**将 `config.toml`、`tokens.json`、`/etc/hyperdown-checkin.env`、SSH 私钥（`*.pem`）提交到 Git。  
-2. 云上密钥文件保持 `chmod 600`；`install.sh` 会强制设置。  
-3. 内嵌的 peer 公钥是官方客户端中的 **X25519 公钥材料**，不是你的账号密码。  
-4. 官方客户端升级后，签到协议可能变化，需重新对照抓包更新 `secure_api.py`。  
-5. 自动化可能违反服务条款，请**仅限个人学习与自用**。
+2. GitHub 凭据只放 **Actions Secrets**，不要写进 workflow yaml。  
+3. 云上密钥文件保持 `chmod 600`；`install.sh` 会强制设置。  
+4. 内嵌的 peer 公钥是官方客户端中的 **X25519 公钥材料**，不是你的账号密码。  
+5. 官方客户端升级后，签到协议可能变化，需重新对照抓包更新 `secure_api.py`。  
+6. 自动化可能违反服务条款，请**仅限个人学习与自用**。
 
 ---
 
