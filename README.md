@@ -32,7 +32,7 @@
 | 查询账号 | 流量余额、今日是否已签到 |
 | 安全签到 | 复现官方 `SealJSON`（ECDH + HKDF + XChaCha20 + HMAC） |
 | 幂等 | 今日已签到 → 直接 **exit 0**（适合 timer / cron / Actions） |
-| 调度 | GitHub Actions（默认约北京 **08:05** + 晚间备份）或 VPS systemd timer |
+| 调度 | GitHub Actions（约北京 **08:05**）或 VPS systemd timer |
 
 签到接口需要带 `X-Hyperdown-Secure: v1` 的加密信封；本仓库默认算法已与官方抓包对齐，可直接用于生产定时任务。细节见 [STATUS.md](./STATUS.md)。
 
@@ -90,8 +90,7 @@ gh run watch -R OWNER/REPO
 
 | Workflow | 触发 | 时间 | 说明 |
 |----------|------|------|------|
-| `checkin.yml` | schedule | UTC `00:05` ≈ 北京 **08:05** | 主签到 |
-| `checkin.yml` | schedule | UTC `12:05` ≈ 北京 **20:05** | 备份（幂等） |
+| `checkin.yml` | schedule | UTC `00:05` ≈ 北京 **08:05** | 每日签到 |
 | `checkin.yml` | `workflow_dispatch` | 手动 | 补签 / 验证 |
 | `keepalive.yml` | schedule | 每月 1 日 UTC `00:00` | 空提交，降低 schedule 停用风险 |
 

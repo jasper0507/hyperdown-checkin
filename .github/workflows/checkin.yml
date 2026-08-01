@@ -1,40 +1,27 @@
-# Hyperdown 每日自动签到。
-# 保活见 keepalive.yml（单独 workflow，避免 cron 字符串双源路由）。
+# Hyperdown 每日自动签到。保活见 keepalive.yml。
 name: Hyperdown Check-in
 
 on:
   workflow_dispatch:
   schedule:
-    # UTC 00:05 ≈ 北京 08:05（主签到）
+    # UTC 00:05 ≈ 北京 08:05
     - cron: "5 0 * * *"
-    # UTC 12:05 ≈ 北京 20:05（备份；应用幂等）
-    - cron: "5 12 * * *"
-
-concurrency:
-  group: hyperdown-checkin
-  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
   checkin:
-    name: Daily check-in
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt
 
       - name: Run check-in
         env:
