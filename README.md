@@ -302,7 +302,7 @@ sudo bash -c 'set -a; source /etc/hyperdown-checkin.env; set +a; \
 |------|----------|------|
 | 退出码 1 | 未配置账号 | 检查 `/etc/hyperdown-checkin.env` 或 `config.toml` |
 | 退出码 2 | 邮箱/密码错误或 token 失效 | 改密码后重跑；删 `tokens.json` 再登录 |
-| 退出码 4 | 出网 / DNS / 代理 | 在服务器上 `curl -I https://hyperdown.net` |
+| 退出码 4 | 出网 / DNS / 代理，或对端掐连接 | 客户端会重试；仍失败则 `curl -I https://hyperdown.net`。GitHub Actions 出口偶发被掐属已知情况 |
 | 退出码 3 / `secure_request_invalid` | 时间不准，或 env 里残留错误 `HYPERDOWN_*_VARIANT` | 开 NTP；去掉调试用变体变量；见 [STATUS.md](./STATUS.md) |
 | 缺 `tomllib` | 系统 Python &lt; 3.11 且无 tomli | venv 中 `pip install tomli`，或 `deploy/remote-fix-tomllib.sh` |
 
@@ -371,6 +371,7 @@ hyperdown-checkin/
 ├── requirements.txt
 ├── README.md                  # 本文件
 ├── STATUS.md                  # 算法终态与运维备忘
+├── tests/                     # 客户端网络重试等
 ├── .gitignore                 # 忽略密钥、token、日志、venv
 ├── .github/workflows/
 │   ├── checkin.yml            # 每日签到（schedule + 手动）

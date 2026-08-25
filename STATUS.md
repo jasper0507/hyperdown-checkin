@@ -102,4 +102,5 @@ systemctl list-timers hyperdown-checkin.timer
 1. **NTP / 时区**：`timedatectl` 应显示 synchronized + 建议 `Asia/Shanghai`。  
 2. **勿在 env 设置过期调试变量**：如已删除的 `HYPERDOWN_WIRE_VARIANT`、错误 KDF 名。  
 3. **env 权限**：`root:root 600` 正确；手动跑请用 root `source` 后再 `sudo -u hyperdown env …`。  
-4. 客户端大版本升级后协议可能变，需重新抓包对照 `secure_api.py`。
+4. 客户端大版本升级后协议可能变，需重新抓包对照 `secure_api.py`。  
+5. **GitHub Actions 出口偶发被掐**（`RemoteDisconnected`）：`HyperdownClient.request()` 会按 `max_attempts` 重试；耗尽后 **exit 4**（`network_error`），不是鉴权失败。

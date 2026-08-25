@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import http.client
 import json
+import socket
 import ssl
+import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -55,6 +59,8 @@ class HyperdownClient:
     proxy: str = ""
     tokens: TokenPair = field(default_factory=TokenPair)
     timeout: float = 30.0
+    max_attempts: int = 3
+    retry_backoff_s: float = 0.5
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
@@ -64,6 +70,8 @@ class HyperdownClient:
             self.base_url = self.base_url + "/v1"
         elif "://" in self.base_url and "/api/" not in self.base_url:
             self.base_url = self.base_url.rstrip("/") + "/api/v1"
+        self.max_attempts = max(1, int(self.max_attempts))
+        self.retry_backoff_s = max(0.0, float(self.retry_backoff_s))
 
     def _opener(self) -> urllib.request.OpenerDirector:
         handlers: list[urllib.request.BaseHandler] = []
@@ -87,6 +95,36 @@ class HyperdownClient:
         auth: bool = True,
         secure: bool | None = None,
     ) -> Any:
+        attempts = self.max_attempts
+        last_error: APIError | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._request_once(
+                    method, path, body=body, auth=auth, secure=secure
+                )
+            except APIError as e:
+                if e.code != "network_error" or attempt >= attempts:
+                    raise
+                last_error = e
+                print(
+                    f"网络中断，重试 {attempt}/{attempts}: {e.message}",
+                    file=sys.stderr,
+                )
+                delay = self.retry_backoff_s * (2 ** (attempt - 1))
+                if delay:
+                    time.sleep(delay)
+        assert last_error is not None
+        raise last_error
+
+    def _request_once(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | bytes | None,
+        auth: bool,
+        secure: bool | None,
+    ) -> Any:
         method = method.upper()
         path = path if path.startswith("/") else "/" + path
         url = self.base_url + path
@@ -101,6 +139,7 @@ class HyperdownClient:
 
         raw_body: bytes | None = None
         # Client seals against full paths like /api/v1/me/checkins.
+        # Rebuild on every attempt so the sealed timestamp stays fresh.
         full_path = path if path.startswith("/api/") else "/api/v1" + (
             path if path.startswith("/") else "/" + path
         )
@@ -133,8 +172,15 @@ class HyperdownClient:
         except urllib.error.HTTPError as e:
             text = e.read().decode(errors="replace")
             status = e.code
-        except urllib.error.URLError as e:
-            raise APIError("network_error", str(e.reason or e), None) from e
+        except (
+            urllib.error.URLError,
+            http.client.HTTPException,
+            TimeoutError,
+            ConnectionError,
+            socket.timeout,
+        ) as e:
+            reason = getattr(e, "reason", e)
+            raise APIError("network_error", str(reason or e), None) from e
 
         try:
             payload = json.loads(text) if text else {}
