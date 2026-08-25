@@ -5,7 +5,7 @@
 [![License: Personal Use](https://img.shields.io/badge/license-personal%20use-lightgrey.svg)](#许可与免责)
 
 用 **Python 3** 自动完成 [Hyperdown](https://hyperdown.net) 每日签到，领取免费高速流量。  
-协议对齐官方桌面客户端（v1.1.3）的登录 / 查询 / 安全签到接口，**不依赖** Windows 客户端常驻运行。
+协议对齐官方桌面客户端（**v1.1.4**）的登录 / 查询 / 安全签到接口，**不依赖** Windows 客户端常驻运行。
 
 > **GitHub Pages 不能跑签到。** 定时执行请用 **GitHub Actions**（本仓库已内置 workflow），或自有 VPS 上的 systemd timer。
 
@@ -31,6 +31,7 @@
 | 登录 / 刷新 token | 自动落盘 `tokens.json`（权限 600） |
 | 查询账号 | 流量余额、今日是否已签到 |
 | 安全签到 | 复现官方 `SealJSON`（ECDH + HKDF + XChaCha20 + HMAC） |
+| 瞬时断连 | HTTP 掐连接 / 超时最多重试 **3** 次（指数退避），耗尽 **exit 4** |
 | 幂等 | 今日已签到 → 直接 **exit 0**（适合 timer / cron / Actions） |
 | 调度 | GitHub Actions（约北京 **08:05**）或 VPS systemd timer |
 
@@ -57,7 +58,8 @@ tomli>=2.0          # 仅 Python < 3.11
 ## 一、GitHub Actions 部署（推荐）
 
 无需自有 VPS：用 [`.github/workflows/checkin.yml`](./.github/workflows/checkin.yml) 每天自动签到；月度保活见 [`keepalive.yml`](./.github/workflows/keepalive.yml)。  
-账号密码只放在 **Repository Secrets**，**不要**写进代码或 commit。
+账号密码只放在 **Repository Secrets**，**不要**写进代码或 commit。  
+Workflow 使用 `actions/checkout@v5`、`actions/setup-python@v6`（Node 24；Python **3.11**）。
 
 ### 1. 配置 Secrets
 
@@ -84,7 +86,9 @@ gh workflow run checkin.yml -R OWNER/REPO
 gh run watch -R OWNER/REPO
 ```
 
-成功日志应含「签到成功」或「今日已签到」。
+成功日志应含「签到成功」或「今日已签到」。  
+对端若掐连接，stderr 会出现 `网络中断，重试 n/3`；三次仍失败则 **exit 4**，不是鉴权失败。  
+当前 workflow 跑完后 **Annotations 应为空**（不应再有 Node 20 弃用警告）。
 
 ### 3. 调度
 
@@ -242,7 +246,13 @@ export HYPERDOWN_PASSWORD=your-password
 python3 checkin.py
 ```
 
-日志：`logs/checkin.log`。
+日志：`logs/checkin.log`。网络重试打在 **stderr**（`网络中断，重试 n/3`），不会写入该文件。
+
+本地网络层测试（不访问 `hyperdown.net`）：
+
+```bash
+python3 -m unittest tests.test_client_network -v
+```
 
 ---
 
@@ -251,6 +261,12 @@ python3 checkin.py
 ### GitHub Actions
 
 配置与试跑见 [一、GitHub Actions 部署](#一github-actions-部署推荐)。日常：仓库 **Actions** 页查看 **Hyperdown Check-in** / **Keepalive** 运行记录。
+
+看一次运行时注意：
+
+- **Annotations 为空** 才是当前预期。若仍有 `Node.js 20 is deprecated`，说明跑的还是旧 workflow（`checkout@v4` / `setup-python@v5`），需要把 `main` 拉到含 `v5` / `v6` 的提交。
+- `Process completed with exit code 1` 且栈里是 `RemoteDisconnected`：旧客户端未捕获掐连接。更新后会先重试，耗尽为 **exit 4**。
+- 日志里的 `鉴权失败`（exit 2）才是邮箱/密码问题；`网络错误` / `网络中断，重试` 走 exit 4。
 
 ### VPS（systemd）常用命令
 
@@ -300,10 +316,12 @@ sudo bash -c 'set -a; source /etc/hyperdown-checkin.env; set +a; \
 
 | 现象 | 可能原因 | 处理 |
 |------|----------|------|
-| 退出码 1 | 未配置账号 | 检查 `/etc/hyperdown-checkin.env` 或 `config.toml` |
-| 退出码 2 | 邮箱/密码错误或 token 失效 | 改密码后重跑；删 `tokens.json` 再登录 |
-| 退出码 4 | 出网 / DNS / 代理，或对端掐连接 | 客户端会重试；仍失败则 `curl -I https://hyperdown.net`。GitHub Actions 出口偶发被掐属已知情况 |
+| 退出码 1 | 未配置账号 | 检查 `/etc/hyperdown-checkin.env` 或 `config.toml`；Actions 则检查 Secrets |
+| 退出码 2 | 邮箱/密码错误或 token 失效 | 改密码后重跑；删 `tokens.json` 再登录。**不是** `RemoteDisconnected` |
+| 退出码 4 | 出网 / DNS / 代理，或对端掐连接 | 会自动重试 3 次；日志见 `网络中断，重试`。仍失败则 `curl -I https://hyperdown.net`。GitHub Actions 出口偶发被掐属已知情况 |
 | 退出码 3 / `secure_request_invalid` | 时间不准，或 env 里残留错误 `HYPERDOWN_*_VARIANT` | 开 NTP；去掉调试用变体变量；见 [STATUS.md](./STATUS.md) |
+| Actions：`Node.js 20 is deprecated` | 旧 workflow（`checkout@v4` / `setup-python@v5`） | 更新到当前 `main`（已改 `@v5` / `@v6`） |
+| Actions：exit 1 且栈为 `RemoteDisconnected` | 旧客户端未把掐连接映射成网络错误 | 更新到当前 `main`；新版重试耗尽为 exit 4 |
 | 缺 `tomllib` | 系统 Python &lt; 3.11 且无 tomli | venv 中 `pip install tomli`，或 `deploy/remote-fix-tomllib.sh` |
 
 ---
@@ -328,7 +346,7 @@ sudo bash -c 'set -a; source /etc/hyperdown-checkin.env; set +a; \
 | 1 | 配置错误 |
 | 2 | 登录 / 鉴权失败 |
 | 3 | 签到或安全封包失败 |
-| 4 | 网络错误 |
+| 4 | 网络错误（含对端掐连接；已重试仍失败） |
 
 ### 环境变量
 
@@ -347,6 +365,8 @@ sudo bash -c 'set -a; source /etc/hyperdown-checkin.env; set +a; \
 | `HYPERDOWN_PROXY` | （空） | HTTP(S) 代理 |
 | `HYPERDOWN_USER_AGENT` | `Go-http-client/1.1` | 与官方客户端一致 |
 
+瞬时断连由客户端默认处理（**不是**环境变量）：最多 **3** 次尝试，退避 0.5s → 1s。业务错误（`ok: false`）不重试。
+
 **调试用（生产请勿设置；代码内默认已通过服务端校验）：**
 
 | 变量 | 默认 |
@@ -354,6 +374,7 @@ sudo bash -c 'set -a; source /etc/hyperdown-checkin.env; set +a; \
 | `HYPERDOWN_KDF_VARIANT` | `ecdh_re_primary` |
 | `HYPERDOWN_SIGN_VARIANT` | `v3_token_nul` |
 | `HYPERDOWN_B64_VARIANT` | `rawurl` |
+| `HYPERDOWN_SIGN_SEP` | `nul` |
 | `HYPERDOWN_SECURE_PEER_PUB` | 内嵌对端 X25519 公钥 hex |
 
 完整算法与服务器运维备忘：[STATUS.md](./STATUS.md)。
@@ -371,7 +392,7 @@ hyperdown-checkin/
 ├── requirements.txt
 ├── README.md                  # 本文件
 ├── STATUS.md                  # 算法终态与运维备忘
-├── tests/                     # 客户端网络重试等
+├── tests/                     # 本地 HTTP 模拟掐连接 / 重试（unittest）
 ├── .gitignore                 # 忽略密钥、token、日志、venv
 ├── .github/workflows/
 │   ├── checkin.yml            # 每日签到（schedule + 手动）
@@ -403,7 +424,7 @@ hyperdown-checkin/
 2. GitHub 凭据只放 **Actions Secrets**，不要写进 workflow yaml。  
 3. 云上密钥文件保持 `chmod 600`；`install.sh` 会强制设置。  
 4. 内嵌的 peer 公钥是官方客户端中的 **X25519 公钥材料**，不是你的账号密码。  
-5. 官方客户端升级后，签到协议可能变化，需重新对照抓包更新 `secure_api.py`。  
+5. 官方客户端升级后，签到协议可能变化，需重新对照抓包更新 `secure_api.py`（封包抓包基准 2026-07-14；本机客户端 v1.1.4 仍可用）。  
 6. 自动化可能违反服务条款，请**仅限个人学习与自用**。
 
 ---

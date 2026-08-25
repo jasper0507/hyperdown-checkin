@@ -2,21 +2,29 @@
 
 > 面向运维与二次开发。日常使用请先看 [README.md](./README.md)。
 
-## 结论（2026-07-14）
+## 结论（2026-08-26）
+
+封包算法抓包基准仍为 **2026-07-14**；此后补了 GitHub Actions 瞬时断连重试，并对过官方客户端 **v1.1.4**（签到仍被服务端接受）。
 
 | 项 | 状态 |
 |----|------|
 | 安全签到封包 | ✅ 与官方抓包对齐，服务端接受 |
+| 官方客户端对照 | ✅ 桌面客户端 ProductVersion **1.1.4**（签到仍被服务端接受） |
 | 幂等（已签到 → exit 0） | ✅ 含 `--force` 时服务端 `already_checked_in` |
+| 瞬时断连 | ✅ `request()` 最多 3 次、指数退避；耗尽 **exit 4** |
 | 云上 systemd timer | ✅ 约每天 08:05（本地时区，建议 Asia/Shanghai） |
-| GitHub Actions 签到 | ✅ `checkin.yml`（UTC 00:05 + dispatch） |
-| GitHub Actions 保活 | ✅ `keepalive.yml`（每月 1 日） |
+| GitHub Actions 签到 | ✅ `checkin.yml`（UTC 00:05 + dispatch；Python 3.11） |
+| GitHub Actions 运行时 | ✅ `checkout@v5` · `setup-python@v6`（Node 24，无 Node 20 弃用警告） |
+| GitHub Actions 保活 | ✅ `keepalive.yml`（每月 1 日，`checkout@v5`） |
 | 默认变体 | `KDF=ecdh_re_primary` · `SIGN=v3_token_nul` · `B64=rawurl` |
 | User-Agent | `Go-http-client/1.1` |
 
 验证方式：
 
 ```bash
+# 网络重试（不访问生产 API）
+python3 -m unittest tests.test_client_network -v
+
 # 正常路径
 sudo systemctl start hyperdown-checkin.service
 sudo journalctl -u hyperdown-checkin.service -n 20 --no-pager
@@ -103,4 +111,5 @@ systemctl list-timers hyperdown-checkin.timer
 2. **勿在 env 设置过期调试变量**：如已删除的 `HYPERDOWN_WIRE_VARIANT`、错误 KDF 名。  
 3. **env 权限**：`root:root 600` 正确；手动跑请用 root `source` 后再 `sudo -u hyperdown env …`。  
 4. 客户端大版本升级后协议可能变，需重新抓包对照 `secure_api.py`。  
-5. **GitHub Actions 出口偶发被掐**（`RemoteDisconnected`）：`HyperdownClient.request()` 会按 `max_attempts` 重试；耗尽后 **exit 4**（`network_error`），不是鉴权失败。
+5. **GitHub Actions 出口偶发被掐**（`RemoteDisconnected`）：`HyperdownClient.request()` 默认 `max_attempts=3`；stderr 为 `网络中断，重试 n/3`。耗尽后 **exit 4**（`network_error`），不是鉴权失败（exit 2）。旧版会 traceback / exit 1，属未更新代码。  
+6. **Actions Annotations**：当前 workflow 不应再出现 Node 20 弃用警告。若仍有，跑的是 `checkout@v4` / `setup-python@v5`。

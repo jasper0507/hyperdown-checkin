@@ -58,7 +58,7 @@ chmod 600 "${ENV_FILE}"
 
 echo "==> 创建 Python venv 并安装依赖"
 if ! command -v python3 &>/dev/null; then
-  echo "未找到 python3，请先安装 Python 3.11+" >&2
+  echo "未找到 python3，请先安装 Python 3.8+" >&2
   exit 1
 fi
 # 部分发行版需要 python3-venv
